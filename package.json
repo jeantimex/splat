@@ -1,0 +1,22 @@
+{
+  "name": "jeantimex.splat",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "format": "prettier --write \"**/*.{ts,js,html,css,md,json}\"",
+    "fomrat": "npm run format",
+    "format:check": "prettier --check \"**/*.{ts,js,html,css,md,json}\"",
+    "lint:md": "markdownlint \"**/*.md\" --ignore node_modules --ignore dist"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.69",
+    "markdownlint-cli": "^0.45.0",
+    "prettier": "^3.6.2",
+    "typescript": "latest",
+    "vite": "^6.0.0"
+  }
+}
