@@ -23,7 +23,12 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error('No compatible GPU adapter found');
 
-  const device = await adapter.requestDevice();
+  const device = await adapter.requestDevice({
+    requiredLimits: {
+      maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+      maxBufferSize: adapter.limits.maxBufferSize,
+    },
+  });
   const context = canvas.getContext('webgpu') as GPUCanvasContext | null;
   if (!context) throw new Error('Unable to create WebGPU canvas context');
 
