@@ -29,6 +29,29 @@ body {
   font-size: 18px;
 }
 
+#dropzone {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  min-width: 360px;
+  max-width: min(80vw, 560px);
+  padding: 24px 28px;
+  border: 2px dashed rgba(255, 255, 255, 0.45);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.45);
+  color: rgba(255, 255, 255, 0.95);
+  text-align: center;
+  font-size: 14px;
+  line-height: 1.4;
+  z-index: 3;
+  pointer-events: none;
+}
+
+#dropzone.hidden {
+  display: none;
+}
+
 #progress {
   position: absolute;
   left: 0;

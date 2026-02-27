@@ -10,10 +10,9 @@ import {
   type CameraPose,
   type Mat4,
 } from './viewer/camera';
-import { SPLAT_ROW_BYTES, streamSplat } from './viewer/loader';
+import { SPLAT_ROW_BYTES } from './viewer/loader';
 import { createSortWorker } from './viewer/sort-worker';
 
-const STREAM_UPDATE_VERTEX_STEP = 8192;
 const PLY_MAGIC = [112, 108, 121, 10];
 
 interface ViewerDom {
@@ -22,6 +21,7 @@ interface ViewerDom {
   fps: HTMLSpanElement;
   progress: HTMLDivElement;
   camId: HTMLSpanElement;
+  dropzone: HTMLDivElement;
 }
 
 const dom = getViewerDom();
@@ -77,6 +77,7 @@ async function main() {
       loadedVertices = vertexCount;
       renderer.setSplatData(splatData, vertexCount);
       dom.message.textContent = '';
+      dom.dropzone.classList.add('hidden');
     },
     onConvertedBuffer: (buffer, save) => {
       const uint = new Uint8Array(buffer);
@@ -123,49 +124,18 @@ async function main() {
 
       const buffer = await file.arrayBuffer();
       if (isPlyBuffer(buffer)) {
-        sortWorker.postPlyBuffer(buffer, true);
+        sortWorker.postPlyBuffer(buffer, false);
         return;
       }
 
       loadedVertices = Math.floor(buffer.byteLength / SPLAT_ROW_BYTES);
       sortWorker.postSplatBuffer(buffer, loadedVertices);
       dom.message.textContent = '';
+      dom.dropzone.classList.add('hidden');
     },
   });
-
-  const datasetUrl = new URLSearchParams(window.location.search).get('url') || '/train.splat';
-  dom.message.textContent = 'Loading splat data...';
-
-  let lastPostedVertexCount = -1;
-  void streamSplat(datasetUrl, ({ vertexCount, buffer, bytesRead, totalBytes, done }) => {
-    const shouldPost =
-      done ||
-      lastPostedVertexCount < 0 ||
-      vertexCount - lastPostedVertexCount >= STREAM_UPDATE_VERTEX_STEP;
-
-    if (vertexCount > loadedVertices || done) {
-      loadedVertices = vertexCount;
-    }
-
-    if (shouldPost) {
-      sortWorker.postSplatBuffer(buffer, vertexCount);
-      lastPostedVertexCount = vertexCount;
-    }
-
-    if (done) {
-      dom.progress.style.display = 'none';
-      dom.message.textContent = '';
-      return;
-    }
-
-    const progressValue = totalBytes
-      ? Math.min(99, Math.round((100 * bytesRead) / totalBytes))
-      : Math.min(99, Math.round(Math.log10(Math.max(bytesRead, 10)) * 20));
-    dom.progress.style.width = `${progressValue}%`;
-  }).catch((err: unknown) => {
-    const text = err instanceof Error ? err.message : String(err);
-    dom.message.textContent = `Load failed: ${text}`;
-  });
+  dom.progress.style.display = 'none';
+  dom.message.textContent = '';
 
   let lastFrame = performance.now();
   let smoothedFps = 0;
@@ -218,12 +188,13 @@ function getViewerDom(): ViewerDom {
   const fps = app.querySelector<HTMLSpanElement>('#fps');
   const progress = app.querySelector<HTMLDivElement>('#progress');
   const camId = app.querySelector<HTMLSpanElement>('#camid');
+  const dropzone = app.querySelector<HTMLDivElement>('#dropzone');
 
-  if (!canvas || !message || !fps || !progress || !camId) {
+  if (!canvas || !message || !fps || !progress || !camId || !dropzone) {
     throw new Error('Missing viewer DOM nodes');
   }
 
-  return { canvas, message, fps, progress, camId };
+  return { canvas, message, fps, progress, camId, dropzone };
 }
 
 function normalizeIndex(index: number, size: number): number {
