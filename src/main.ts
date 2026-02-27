@@ -13,6 +13,8 @@ import {
 import { SPLAT_ROW_BYTES } from './viewer/loader';
 import { createSortWorker } from './viewer/sort-worker';
 
+// ASCII bytes for the text "ply\n".
+// We use this fast signature check to route dropped files into the PLY decode path.
 const PLY_MAGIC = [112, 108, 121, 10];
 
 interface ViewerDom {
@@ -27,11 +29,17 @@ interface ViewerDom {
 const dom = getViewerDom();
 
 async function main() {
+  // Hard fail early when WebGPU is unavailable so we do not initialize
+  // event listeners or workers that can never render.
   if (!navigator.gpu) {
     dom.message.textContent = 'WebGPU is not available in this browser.';
     return;
   }
 
+  // Core subsystems:
+  // - renderer: WebGPU resources + draw calls
+  // - controls: input -> view matrix updates
+  // - GUI: runtime toggles
   const renderer = await createWebGPURenderer(dom.canvas);
   const controls = createControls(dom.canvas);
   const renderOptions = {
@@ -44,6 +52,8 @@ async function main() {
   let currentCameraIndex = 0;
   let loadedVertices = 0;
 
+  // Applies one camera preset (intrinsics + pose) to the live controls.
+  // We also stop carousel mode so preset selection is deterministic.
   const applyCamera = (index: number) => {
     if (!cameras.length) return;
     currentCameraIndex = normalizeIndex(index, cameras.length);
@@ -55,6 +65,8 @@ async function main() {
     dom.camId.textContent = `cam ${currentCameraIndex}`;
   };
 
+  // Restores a serialized 4x4 view matrix from URL hash.
+  // Returns false when hash is missing/invalid so caller can fallback to defaults.
   const setViewFromHash = (hashValue: string) => {
     const matrix = decodeViewMatrix(hashValue);
     if (!matrix) return false;
@@ -64,21 +76,31 @@ async function main() {
     return true;
   };
 
+  // Persists the current camera matrix into URL hash for reproducible viewpoints.
   const saveViewToHash = () => {
     location.hash = `#${encodeURIComponent(encodeViewMatrix(controls.viewMatrix))}`;
     dom.camId.textContent = '';
   };
 
+  // Worker owns CPU-heavy preprocessing:
+  // 1) optional .ply -> internal splat buffer conversion
+  // 2) per-frame depth sorting for correct alpha composition
+  // Main thread only uploads worker outputs to GPU.
   const sortWorker = createSortWorker({
     onSortResult: ({ depthIndex }) => {
       renderer.setSortedIndices(depthIndex);
     },
+    // Worker has rebuilt packed GPU payload.
+    // Upload to renderer and hide startup UI once first payload arrives.
     onSplatData: ({ splatData, vertexCount }) => {
       loadedVertices = vertexCount;
       renderer.setSplatData(splatData, vertexCount);
       dom.message.textContent = '';
       dom.dropzone.classList.add('hidden');
     },
+    // Optional conversion callback (PLY -> SPLAT buffer).
+    // In our current UX we do not auto-save on drop, but we keep download support
+    // for other flows that may set save=true.
     onConvertedBuffer: (buffer, save) => {
       const uint = new Uint8Array(buffer);
       loadedVertices = Math.floor(uint.byteLength / SPLAT_ROW_BYTES);
@@ -89,10 +111,12 @@ async function main() {
     },
   });
 
+  // If URL has a saved camera matrix, prefer that over baked dataset cameras.
   if (!setViewFromHash(location.hash.slice(1))) {
     applyCamera(currentCameraIndex);
   }
 
+  // Camera hotkeys (+/-/0-9/P/V).
   registerKeyboardShortcuts({
     applyCamera,
     getCurrentCameraIndex: () => currentCameraIndex,
@@ -103,15 +127,18 @@ async function main() {
     },
   });
 
+  // Keep hash-driven camera restoration reactive.
   window.addEventListener('hashchange', () => {
     setViewFromHash(location.hash.slice(1));
   });
 
+  // File-drop entrypoint for scene and camera data.
   registerDragDrop({
     onFile: async (file) => {
       controls.setCarousel(false);
       dom.message.textContent = `Loading ${file.name}...`;
 
+      // Support optional camera metadata sidecar.
       if (/\.json$/i.test(file.name)) {
         const parsed = JSON.parse(await file.text()) as CameraPose[];
         if (Array.isArray(parsed) && parsed.length > 0) {
@@ -122,6 +149,9 @@ async function main() {
         return;
       }
 
+      // Scene payload path:
+      // - PLY: decode in worker (standard or compressed)
+      // - SPLAT: send directly to worker sorting path
       const buffer = await file.arrayBuffer();
       if (isPlyBuffer(buffer)) {
         sortWorker.postPlyBuffer(buffer, false);
@@ -140,6 +170,11 @@ async function main() {
   let lastFrame = performance.now();
   let smoothedFps = 0;
 
+  // Main render loop:
+  // 1) update controls -> view matrix
+  // 2) compute viewProjection and send to worker for sort updates
+  // 3) draw with latest sorted indices and splat payload
+  // 4) update HUD stats
   const frame = (now: number) => {
     const dtMs = Math.max(now - lastFrame, 0.0001);
     lastFrame = now;
@@ -180,6 +215,7 @@ main().catch((err: unknown) => {
 });
 
 function getViewerDom(): ViewerDom {
+  // We query from #app to avoid accidental collisions with unrelated DOM ids.
   const app = document.querySelector<HTMLDivElement>('#app');
   if (!app) throw new Error('Missing #app root element');
 
@@ -198,6 +234,7 @@ function getViewerDom(): ViewerDom {
 }
 
 function normalizeIndex(index: number, size: number): number {
+  // "safe modulo" that works for negative inputs as well.
   return ((index % size) + size) % size;
 }
 
@@ -215,11 +252,14 @@ function decodeViewMatrix(encoded: string): Mat4 | null {
 }
 
 function encodeViewMatrix(matrix: Mat4): string {
+  // Quantize for shorter URL hash while keeping usable precision.
   const rounded = matrix.map((value) => Math.round(value * 100) / 100);
   return JSON.stringify(rounded);
 }
 
 function downloadBinary(data: Uint8Array, filename: string) {
+  // Create an owned copy so the Blob payload is stable even if caller
+  // reuses/mutates the original typed array.
   const copy = new Uint8Array(data);
   const blob = new Blob([copy.buffer], { type: 'application/octet-stream' });
   const url = URL.createObjectURL(blob);
@@ -233,6 +273,7 @@ function downloadBinary(data: Uint8Array, filename: string) {
 }
 
 function isPlyBuffer(buffer: ArrayBuffer): boolean {
+  // Header-only check; sufficient for routing dropped files.
   const bytes = new Uint8Array(buffer);
   return PLY_MAGIC.every((value, index) => bytes[index] === value);
 }
@@ -247,6 +288,7 @@ function registerKeyboardShortcuts(params: {
   const { applyCamera, getCurrentCameraIndex, saveViewToHash, setCarousel, clearCameraLabel } =
     params;
 
+  // We use keydown only; camera navigation actions are stateless per keypress.
   window.addEventListener('keydown', (event) => {
     if (/^\d$/.test(event.key)) {
       applyCamera(Number.parseInt(event.key, 10));
@@ -274,6 +316,7 @@ function registerKeyboardShortcuts(params: {
 function registerDragDrop(params: { onFile: (file: File) => Promise<void> }) {
   const { onFile } = params;
 
+  // Prevent browser default "open file in tab" behavior so the app can own drop flow.
   const preventDefault = (event: DragEvent) => {
     event.preventDefault();
     event.stopPropagation();

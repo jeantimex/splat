@@ -1,8 +1,12 @@
 struct Uniforms {
+  // Standard camera transforms.
   projection: mat4x4<f32>,
   view: mat4x4<f32>,
+  // Focal lengths from source camera intrinsics.
   focal: vec2<f32>,
+  // Canvas size in physical pixels.
   viewport: vec2<f32>,
+  // x: render mode (0=splat, 1=point), y: point size in pixels.
   render_params: vec2<f32>,
   _padding: vec2<f32>,
 }
@@ -25,9 +29,11 @@ struct VSOut {
 
 @vertex
 fn vs_main(input: VSIn) -> VSOut {
+  // Instance id -> sorted splat index (CPU produces back-to-front ordering).
   let index = sorted_indices[input.instance_id];
   let base = index * 8u;
 
+  // Packed centers are stored as uint bits for zero-loss roundtrip.
   let center = vec3<f32>(
     bitcast<f32>(splats[base + 0u]),
     bitcast<f32>(splats[base + 1u]),
@@ -37,6 +43,7 @@ fn vs_main(input: VSIn) -> VSOut {
   let cam = uniforms.view * vec4<f32>(center, 1.0);
   let pos2d = uniforms.projection * cam;
 
+  // Cheap clip rejection before covariance math.
   let clip = 1.2 * pos2d.w;
   if (
     pos2d.z < -clip ||
@@ -51,6 +58,7 @@ fn vs_main(input: VSIn) -> VSOut {
     return culled;
   }
 
+  // Packed color is RGBA8 in one uint.
   let packed_color = splats[base + 7u];
   let color = vec4<f32>(
     f32(packed_color & 0xffu),
@@ -67,10 +75,12 @@ fn vs_main(input: VSIn) -> VSOut {
   var minor_axis: vec2<f32>;
 
   if (point_mode > 0.5) {
+    // Point mode: fixed-size axis-aligned quad in screen space.
     let point_size = max(uniforms.render_params.y, 0.5);
     major_axis = vec2<f32>(point_size, 0.0);
     minor_axis = vec2<f32>(0.0, point_size);
   } else {
+    // Splat mode: unpack covariance terms and project to 2D ellipse.
     let cov0 = unpack2x16float(splats[base + 4u]);
     let cov1 = unpack2x16float(splats[base + 5u]);
     let cov2 = unpack2x16float(splats[base + 6u]);
@@ -92,6 +102,7 @@ fn vs_main(input: VSIn) -> VSOut {
     let t = transpose(view3) * j;
     let cov2d = transpose(t) * vrk * t;
 
+    // Solve ellipse principal axes from 2x2 covariance.
     let mid = (cov2d[0][0] + cov2d[1][1]) * 0.5;
     let radius = length(vec2<f32>((cov2d[0][0] - cov2d[1][1]) * 0.5, cov2d[0][1]));
     let lambda1 = mid + radius;

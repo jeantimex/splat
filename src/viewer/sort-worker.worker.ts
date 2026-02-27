@@ -25,6 +25,8 @@ interface WorkerToMainDepth {
   vertexCount: number;
 }
 
+// Internal CPU-side row format used by both .splat and converted .ply:
+// position xyz (float32x3), scale xyz (float32x3), color rgba8, quaternion xyzw8.
 const ROW_BYTES = 3 * 4 + 3 * 4 + 4 + 4;
 
 let sourceBuffer: ArrayBuffer | null = null;
@@ -39,6 +41,8 @@ const floatView = new Float32Array(1);
 const int32View = new Int32Array(floatView.buffer);
 
 function floatToHalf(float: number): number {
+  // Custom float32 -> float16 conversion used to pack covariance terms.
+  // This keeps GPU payload compact while preserving enough precision.
   floatView[0] = float;
   const f = int32View[0];
 
@@ -79,6 +83,7 @@ function postSplatPayload() {
   const packedBytes = new Uint8Array(packed.buffer);
 
   for (let i = 0; i < vertexCount; i++) {
+    // Copy center position bit-pattern directly; vertex shader bitcasts back to f32.
     packed[8 * i + 0] = int32ViewFromFloat(fBuffer[8 * i + 0]);
     packed[8 * i + 1] = int32ViewFromFloat(fBuffer[8 * i + 1]);
     packed[8 * i + 2] = int32ViewFromFloat(fBuffer[8 * i + 2]);
@@ -96,6 +101,7 @@ function postSplatPayload() {
       (uBuffer[32 * i + 28 + 3] - 128) / 128,
     ];
 
+    // Build scale-rot matrix from quantized quaternion + scale.
     const m = [
       1.0 - 2.0 * (rot[2] * rot[2] + rot[3] * rot[3]),
       2.0 * (rot[1] * rot[2] + rot[0] * rot[3]),
@@ -110,6 +116,7 @@ function postSplatPayload() {
       1.0 - 2.0 * (rot[1] * rot[1] + rot[2] * rot[2]),
     ].map((value, idx) => value * scale[Math.floor(idx / 3)]);
 
+    // Upper triangle of covariance in world space.
     const sigma = [
       m[0] * m[0] + m[3] * m[3] + m[6] * m[6],
       m[0] * m[1] + m[3] * m[4] + m[6] * m[7],
@@ -124,6 +131,7 @@ function postSplatPayload() {
     packed[8 * i + 6] = packHalf2x16(4 * sigma[4], 4 * sigma[5]);
   }
 
+  // Transfer ownership of packed buffer to main thread (zero-copy semantics).
   const msg: WorkerToMainSplat = {
     type: 'splat',
     splatData: packed.buffer,
@@ -142,6 +150,7 @@ function runSort(proj: number[]) {
   const fBuffer = new Float32Array(sourceBuffer);
 
   if (lastVertexCount === vertexCount) {
+    // Skip sort when view direction barely changed.
     const dot = lastProj[2] * proj[2] + lastProj[6] * proj[6] + lastProj[10] * proj[10];
     if (Math.abs(dot - 1) < 0.01) return;
   } else {
@@ -149,6 +158,7 @@ function runSort(proj: number[]) {
     lastVertexCount = vertexCount;
   }
 
+  // Project centers to a scalar depth key in view-projection space.
   let maxDepth = -Infinity;
   let minDepth = Infinity;
   const sizeList = new Int32Array(vertexCount);
@@ -166,6 +176,8 @@ function runSort(proj: number[]) {
     if (depth < minDepth) minDepth = depth;
   }
 
+  // 16-bit counting sort:
+  // fast enough for large splat sets and stable for alpha blending order.
   const depthInv = (256 * 256 - 1) / (maxDepth - minDepth || 1);
   const counts0 = new Uint32Array(256 * 256);
   for (let i = 0; i < vertexCount; i++) {
@@ -199,6 +211,9 @@ function processPlyBuffer(inputBuffer: ArrayBuffer): ArrayBuffer {
   const headerEndIndex = header.indexOf(headerEnd);
   if (headerEndIndex < 0) throw new Error('Unable to read .ply file header');
 
+  // We parse PLY structure as generic elements to support both:
+  // - standard Gaussian PLY (explicit attributes)
+  // - SuperSplat compressed PLY (chunk + packed vertex fields)
   const headerLines = header.slice(0, headerEndIndex).split('\n');
   const elements: Array<{
     name: string;
@@ -249,6 +264,7 @@ function processStandardPlyBuffer(
   vertexDataStart: number,
 ): ArrayBuffer {
   const plyVertexCount = vertexElement.count;
+  // Map PLY scalar types to DataView getters.
   const typeMap: Record<string, string> = {
     double: 'getFloat64',
     int: 'getInt32',
@@ -272,6 +288,7 @@ function processStandardPlyBuffer(
 
   const dataView = new DataView(inputBuffer, vertexDataStart);
   let row = 0;
+  // Attribute accessor resolves current row lazily.
   const attrs = new Proxy<Record<string, number>>(
     {},
     {
@@ -286,6 +303,7 @@ function processStandardPlyBuffer(
     },
   );
 
+  // Importance sort (size * opacity) improves progressive quality.
   const sizeList = new Float32Array(plyVertexCount);
   const sizeIndex = new Uint32Array(plyVertexCount);
   for (row = 0; row < plyVertexCount; row++) {
@@ -358,6 +376,9 @@ function processCompressedPlyBuffer(
   }>,
   dataStart: number,
 ): ArrayBuffer {
+  // Compressed layout:
+  // - chunk table with min/max ranges
+  // - packed vertex payload (position/rotation/scale/color as uint32)
   const chunkElement = elements.find((element) => element.name === 'chunk');
   const vertexElement = elements.find((element) => element.name === 'vertex');
   if (!chunkElement || !vertexElement) {
@@ -377,6 +398,7 @@ function processCompressedPlyBuffer(
   const sqrt2 = 1.4142135623730951;
 
   for (let i = 0; i < vertexCount; i++) {
+    // Vertices are chunk-local; each chunk describes value ranges.
     const chunkIndex = i >> 8;
     const chunkBase = dataStart + chunkIndex * chunkStride;
     const vertexBase = vertexStart + i * vertexStride;
@@ -415,11 +437,13 @@ function processCompressedPlyBuffer(
     const sy = (packedScale >> 11) & 0x3ff;
     const sz = packedScale & 0x7ff;
 
+    // Unpack quantized center using chunk-local min/max ranges.
     const position = new Float32Array(output, i * ROW_BYTES, 3);
     position[0] = minX + (px / q11Max) * (maxX - minX);
     position[1] = minY + (py / q10Max) * (maxY - minY);
     position[2] = minZ + (pz / q11Max) * (maxZ - minZ);
 
+    // Scale is stored in log domain; exponentiate back to linear scale.
     const scales = new Float32Array(output, i * ROW_BYTES + 12, 3);
     const logScaleX = minScaleX + (sx / q11Max) * (maxScaleX - minScaleX);
     const logScaleY = minScaleY + (sy / q10Max) * (maxScaleY - minScaleY);
@@ -441,6 +465,7 @@ function processCompressedPlyBuffer(
     rgba[2] = clamp255(colorB * 255);
     rgba[3] = co;
 
+    // Decode 2+10+10+10 packed quaternion (largest component omitted).
     const rot = new Uint8ClampedArray(output, i * ROW_BYTES + 28, 4);
     const quat = decodePackedQuaternion(packedRotation, sqrt2);
     rot[0] = clamp255(quat[0] * 128 + 128);
@@ -461,6 +486,7 @@ function decodePackedQuaternion(packed: number, sqrt2: number): [number, number,
   const v1 = (b / 1023 - 0.5) * sqrt2;
   const v2 = (c / 1023 - 0.5) * sqrt2;
 
+  // Reconstruct omitted largest component from unit-length constraint.
   const quat: [number, number, number, number] = [0, 0, 0, 0];
   const rem = [v0, v1, v2];
   let remIdx = 0;
@@ -479,6 +505,7 @@ function clamp255(value: number): number {
 }
 
 function throttledSort() {
+  // Coalesce rapid view updates so sort work does not backlog.
   if (sortRunning) return;
   sortRunning = true;
   const lastView = viewProj;
@@ -494,6 +521,7 @@ function throttledSort() {
 ctx.onmessage = (event: MessageEvent<MainToWorkerMessage>) => {
   const msg = event.data;
   if (msg.type === 'ply') {
+    // Reset state before conversion so UI can reflect transient empty payload.
     vertexCount = 0;
     runSort(viewProj);
     sourceBuffer = processPlyBuffer(msg.buffer);
@@ -508,12 +536,14 @@ ctx.onmessage = (event: MessageEvent<MainToWorkerMessage>) => {
   }
 
   if (msg.type === 'buffer') {
+    // Raw splat upload path (already in internal 32-byte row format).
     sourceBuffer = msg.buffer;
     vertexCount = msg.vertexCount;
     return;
   }
 
   if (msg.type === 'view') {
+    // Sorting is view-dependent; every camera update can change draw order.
     viewProj = msg.viewProj;
     throttledSort();
   }

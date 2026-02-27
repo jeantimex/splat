@@ -2,6 +2,8 @@ import type { Mat4 } from './camera';
 import vertexShaderSource from './shaders/splat.vert.wgsl?raw';
 import fragmentShaderSource from './shaders/splat.frag.wgsl?raw';
 
+// 2x mat4 + focal vec2 + viewport vec2 + render params vec4.
+// See WGSL Uniforms struct for exact layout.
 const UNIFORM_FLOATS = 40;
 const UNIFORM_BYTES = UNIFORM_FLOATS * 4;
 
@@ -23,6 +25,8 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error('No compatible GPU adapter found');
 
+  // Request adapter-reported limits explicitly so large scenes can bind
+  // storage buffers above the default (often 128MB).
   const device = await adapter.requestDevice({
     requiredLimits: {
       maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
@@ -34,12 +38,15 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
 
   const format = navigator.gpu.getPreferredCanvasFormat();
 
+  // Single uniform buffer updated every frame.
   const uniformBuffer = device.createBuffer({
     label: 'viewer uniforms',
     size: UNIFORM_BYTES,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
 
+  // We render every splat as an instanced screen-space quad.
+  // The vertex shader expands this quad into ellipse axes per instance.
   const quadVertices = new Float32Array([-2, -2, 2, -2, -2, 2, 2, 2]);
   const quadVertexBuffer = device.createBuffer({
     label: 'quad vertices',
@@ -52,6 +59,9 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
   let indexCapacity = 4;
   let instanceCount = 0;
 
+  // Storage buffers:
+  // - splatBuffer: packed per-splat payload (8 u32 per splat)
+  // - sortedIndexBuffer: depth-sorted instance ids
   let splatBuffer = device.createBuffer({
     label: 'splat buffer',
     size: splatCapacity * 4,
@@ -71,6 +81,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
     ],
   });
 
+  // Bind group is recreated whenever either storage buffer is reallocated.
   const createBindGroup = () =>
     device.createBindGroup({
       layout: bindGroupLayout,
@@ -83,6 +94,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
 
   let bindGroup = createBindGroup();
 
+  // One graphics pipeline handles both splat/point modes via uniform flag.
   const pipeline = device.createRenderPipeline({
     layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
     vertex: {
@@ -122,6 +134,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
 
   const ensureSplatCapacity = (requiredU32: number) => {
     if (requiredU32 <= splatCapacity) return;
+    // Grow geometrically to avoid frequent reallocations on incremental loads.
     splatCapacity = nextPow2(requiredU32);
     splatBuffer.destroy();
     splatBuffer = device.createBuffer({
@@ -134,6 +147,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
 
   const ensureIndexCapacity = (requiredU32: number) => {
     if (requiredU32 <= indexCapacity) return;
+    // Same geometric growth policy for sorted index buffer.
     indexCapacity = nextPow2(requiredU32);
     sortedIndexBuffer.destroy();
     sortedIndexBuffer = device.createBuffer({
@@ -145,6 +159,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
   };
 
   const resize = () => {
+    // Canvas is device-pixel aware; CSS size is handled in styles.
     const dpr = Math.max(1, window.devicePixelRatio || 1);
     canvas.width = Math.round(canvas.clientWidth * dpr);
     canvas.height = Math.round(canvas.clientHeight * dpr);
@@ -161,6 +176,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
   const uniformData = new Float32Array(UNIFORM_FLOATS);
 
   const render = (state: RenderState) => {
+    // Uniform packing mirrors WGSL struct order exactly.
     uniformData.set(state.projection, 0);
     uniformData.set(state.view, 16);
     uniformData[32] = state.focal[0];
@@ -188,6 +204,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
     pass.setVertexBuffer(0, quadVertexBuffer);
+    // Draw happens only after both payload and indices are available.
     if (instanceCount > 0) {
       pass.draw(4, instanceCount, 0, 0);
     }
@@ -202,6 +219,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       return;
     }
     ensureSplatCapacity(packed.length);
+    // Upload a copy to prevent accidental external mutation during GPU readback.
     const upload = new Uint32Array(packed);
     device.queue.writeBuffer(splatBuffer, 0, upload);
     instanceCount = vertexCount;
@@ -213,6 +231,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       return;
     }
     ensureIndexCapacity(indices.length);
+    // Same defensive copy for indices.
     const upload = new Uint32Array(indices);
     device.queue.writeBuffer(sortedIndexBuffer, 0, upload);
     instanceCount = indices.length;

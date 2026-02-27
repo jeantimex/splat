@@ -8,12 +8,14 @@ struct VSOut {
 @fragment
 fn fs_main(input: VSOut) -> @location(0) vec4<f32> {
   if (input.v_mode > 0.5) {
+    // Point mode: hard-ish circular footprint for dense cloud readability.
     if (dot(input.v_position, input.v_position) > 4.0) {
       discard;
     }
     return vec4<f32>(input.v_color.rgb, input.v_color.a);
   }
 
+  // Splat mode: gaussian footprint in local quad space.
   let a = -dot(input.v_position, input.v_position);
   if (a < -4.0) {
     discard;
