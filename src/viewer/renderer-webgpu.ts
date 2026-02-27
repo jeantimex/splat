@@ -1,6 +1,7 @@
 import type { Mat4 } from './camera';
 import vertexShaderSource from './shaders/splat.vert.wgsl?raw';
 import fragmentShaderSource from './shaders/splat.frag.wgsl?raw';
+import anaglyphCompositeShaderSource from './shaders/anaglyph-composite.wgsl?raw';
 
 // 2x mat4 + focal vec2 + viewport vec2 + render params vec4.
 // See WGSL Uniforms struct for exact layout.
@@ -10,9 +11,12 @@ const UNIFORM_BYTES = UNIFORM_FLOATS * 4;
 export interface RenderState {
   projection: Mat4;
   view: Mat4;
+  viewLeft: Mat4;
+  viewRight: Mat4;
   focal: [number, number];
   pointCloudEnabled: boolean;
   pointSize: number;
+  stereoMode: 'off' | 'anaglyph' | 'sbs';
 }
 
 export interface WebGPURenderer {
@@ -94,43 +98,75 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
 
   let bindGroup = createBindGroup();
 
-  // One graphics pipeline handles both splat/point modes via uniform flag.
-  const pipeline = device.createRenderPipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
+  const createPipeline = (writeMask: GPUColorWriteFlags = GPUColorWrite.ALL) =>
+    device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
+      vertex: {
+        module: device.createShaderModule({ code: vertexShaderSource }),
+        entryPoint: 'vs_main',
+        buffers: [
+          {
+            arrayStride: 8,
+            stepMode: 'vertex',
+            attributes: [{ shaderLocation: 0, format: 'float32x2', offset: 0 }],
+          },
+        ],
+      },
+      fragment: {
+        module: device.createShaderModule({ code: fragmentShaderSource }),
+        entryPoint: 'fs_main',
+        targets: [
+          {
+            format,
+            blend: {
+              color: {
+                srcFactor: 'one-minus-dst-alpha',
+                dstFactor: 'one',
+                operation: 'add',
+              },
+              alpha: {
+                srcFactor: 'one-minus-dst-alpha',
+                dstFactor: 'one',
+                operation: 'add',
+              },
+            },
+            writeMask,
+          },
+        ],
+      },
+      primitive: { topology: 'triangle-strip' },
+    });
+
+  const pipeline = createPipeline();
+
+  const anaglyphSampler = device.createSampler({
+    magFilter: 'linear',
+    minFilter: 'linear',
+  });
+  const anaglyphCompositeBindGroupLayout = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+      { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+    ],
+  });
+  const anaglyphCompositePipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [anaglyphCompositeBindGroupLayout] }),
     vertex: {
-      module: device.createShaderModule({ code: vertexShaderSource }),
+      module: device.createShaderModule({ code: anaglyphCompositeShaderSource }),
       entryPoint: 'vs_main',
-      buffers: [
-        {
-          arrayStride: 8,
-          stepMode: 'vertex',
-          attributes: [{ shaderLocation: 0, format: 'float32x2', offset: 0 }],
-        },
-      ],
     },
     fragment: {
-      module: device.createShaderModule({ code: fragmentShaderSource }),
+      module: device.createShaderModule({ code: anaglyphCompositeShaderSource }),
       entryPoint: 'fs_main',
-      targets: [
-        {
-          format,
-          blend: {
-            color: {
-              srcFactor: 'one-minus-dst-alpha',
-              dstFactor: 'one',
-              operation: 'add',
-            },
-            alpha: {
-              srcFactor: 'one-minus-dst-alpha',
-              dstFactor: 'one',
-              operation: 'add',
-            },
-          },
-        },
-      ],
+      targets: [{ format }],
     },
     primitive: { topology: 'triangle-strip' },
   });
+
+  let leftEyeTexture = createEyeTexture();
+  let rightEyeTexture = createEyeTexture();
+  let anaglyphCompositeBindGroup = createAnaglyphCompositeBindGroup();
 
   const ensureSplatCapacity = (requiredU32: number) => {
     if (requiredU32 <= splatCapacity) return;
@@ -168,6 +204,11 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       format,
       alphaMode: 'premultiplied',
     });
+    leftEyeTexture.destroy();
+    rightEyeTexture.destroy();
+    leftEyeTexture = createEyeTexture();
+    rightEyeTexture = createEyeTexture();
+    anaglyphCompositeBindGroup = createAnaglyphCompositeBindGroup();
   };
 
   window.addEventListener('resize', resize);
@@ -176,39 +217,152 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
   const uniformData = new Float32Array(UNIFORM_FLOATS);
 
   const render = (state: RenderState) => {
-    // Uniform packing mirrors WGSL struct order exactly.
-    uniformData.set(state.projection, 0);
-    uniformData.set(state.view, 16);
-    uniformData[32] = state.focal[0];
-    uniformData[33] = state.focal[1];
-    uniformData[34] = canvas.width;
-    uniformData[35] = canvas.height;
-    uniformData[36] = state.pointCloudEnabled ? 1 : 0;
-    uniformData[37] = state.pointSize;
-    uniformData[38] = 0;
-    uniformData[39] = 0;
-    device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+    const writeUniforms = (
+      projection: Mat4,
+      view: Mat4,
+      viewportWidth: number,
+      viewportHeight: number,
+    ) => {
+      uniformData.set(projection, 0);
+      uniformData.set(view, 16);
+      uniformData[32] = state.focal[0];
+      uniformData[33] = state.focal[1];
+      uniformData[34] = viewportWidth;
+      uniformData[35] = viewportHeight;
+      uniformData[36] = state.pointCloudEnabled ? 1 : 0;
+      uniformData[37] = state.pointSize;
+      uniformData[38] = 0;
+      uniformData[39] = 0;
+      device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+    };
+    const halfWidthProjection = (): Mat4 => {
+      const adjusted = [...state.projection];
+      adjusted[0] *= 2;
+      return adjusted;
+    };
 
     const encoder = device.createCommandEncoder();
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [
-        {
-          view: context.getCurrentTexture().createView(),
-          clearValue: { r: 0, g: 0, b: 0, a: 0 },
-          loadOp: 'clear',
-          storeOp: 'store',
-        },
-      ],
-    });
-
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(0, bindGroup);
-    pass.setVertexBuffer(0, quadVertexBuffer);
-    // Draw happens only after both payload and indices are available.
-    if (instanceCount > 0) {
+    const textureView = context.getCurrentTexture().createView();
+    const drawSplats = (params: {
+      targetView: GPUTextureView;
+      view: Mat4;
+      viewportX: number;
+      viewportY: number;
+      viewportWidth: number;
+      viewportHeight: number;
+      projection: Mat4;
+      clear: boolean;
+    }) => {
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view: params.targetView,
+            clearValue: { r: 0, g: 0, b: 0, a: 0 },
+            loadOp: params.clear ? 'clear' : 'load',
+            storeOp: 'store',
+          },
+        ],
+      });
+      pass.setBindGroup(0, bindGroup);
+      pass.setVertexBuffer(0, quadVertexBuffer);
+      pass.setViewport(
+        params.viewportX,
+        params.viewportY,
+        params.viewportWidth,
+        params.viewportHeight,
+        0,
+        1,
+      );
+      writeUniforms(params.projection, params.view, params.viewportWidth, params.viewportHeight);
+      pass.setPipeline(pipeline);
       pass.draw(4, instanceCount, 0, 0);
+      pass.end();
+    };
+
+    if (instanceCount > 0 && state.stereoMode === 'anaglyph') {
+      drawSplats({
+        targetView: leftEyeTexture.createView(),
+        view: state.viewLeft,
+        viewportX: 0,
+        viewportY: 0,
+        viewportWidth: canvas.width,
+        viewportHeight: canvas.height,
+        projection: state.projection,
+        clear: true,
+      });
+      drawSplats({
+        targetView: rightEyeTexture.createView(),
+        view: state.viewRight,
+        viewportX: 0,
+        viewportY: 0,
+        viewportWidth: canvas.width,
+        viewportHeight: canvas.height,
+        projection: state.projection,
+        clear: true,
+      });
+
+      const compositePass = encoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view: textureView,
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+            loadOp: 'clear',
+            storeOp: 'store',
+          },
+        ],
+      });
+      compositePass.setPipeline(anaglyphCompositePipeline);
+      compositePass.setBindGroup(0, anaglyphCompositeBindGroup);
+      compositePass.draw(4, 1, 0, 0);
+      compositePass.end();
+    } else if (instanceCount > 0 && state.stereoMode === 'sbs') {
+      const halfWidth = Math.max(1, Math.floor(canvas.width / 2));
+      const projectionHalf = halfWidthProjection();
+
+      drawSplats({
+        targetView: textureView,
+        view: state.viewLeft,
+        viewportX: 0,
+        viewportY: 0,
+        viewportWidth: halfWidth,
+        viewportHeight: canvas.height,
+        projection: projectionHalf,
+        clear: true,
+      });
+      drawSplats({
+        targetView: textureView,
+        view: state.viewRight,
+        viewportX: halfWidth,
+        viewportY: 0,
+        viewportWidth: canvas.width - halfWidth,
+        viewportHeight: canvas.height,
+        projection: projectionHalf,
+        clear: false,
+      });
+    } else if (instanceCount > 0) {
+      drawSplats({
+        targetView: textureView,
+        view: state.view,
+        viewportX: 0,
+        viewportY: 0,
+        viewportWidth: canvas.width,
+        viewportHeight: canvas.height,
+        projection: state.projection,
+        clear: true,
+      });
+    } else {
+      const emptyPass = encoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view: textureView,
+            clearValue: { r: 0, g: 0, b: 0, a: 0 },
+            loadOp: 'clear',
+            storeOp: 'store',
+          },
+        ],
+      });
+      emptyPass.end();
     }
-    pass.end();
 
     device.queue.submit([encoder.finish()]);
   };
@@ -236,6 +390,29 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
     device.queue.writeBuffer(sortedIndexBuffer, 0, upload);
     instanceCount = indices.length;
   };
+
+  function createEyeTexture() {
+    return device.createTexture({
+      size: {
+        width: Math.max(1, canvas.width),
+        height: Math.max(1, canvas.height),
+        depthOrArrayLayers: 1,
+      },
+      format,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+  }
+
+  function createAnaglyphCompositeBindGroup() {
+    return device.createBindGroup({
+      layout: anaglyphCompositeBindGroupLayout,
+      entries: [
+        { binding: 0, resource: anaglyphSampler },
+        { binding: 1, resource: leftEyeTexture.createView() },
+        { binding: 2, resource: rightEyeTexture.createView() },
+      ],
+    });
+  }
 
   return { render, setSplatData, setSortedIndices };
 }

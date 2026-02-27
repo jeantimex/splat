@@ -6,7 +6,9 @@ import {
   DEFAULT_CAMERAS,
   getProjectionMatrix,
   getViewMatrix,
+  invert4,
   multiply4,
+  translate4,
   type CameraPose,
   type Mat4,
 } from './viewer/camera';
@@ -24,6 +26,8 @@ interface ViewerDom {
   progress: HTMLDivElement;
   camId: HTMLSpanElement;
   dropzone: HTMLDivElement;
+  anaglyphButton: HTMLButtonElement;
+  stereoButton: HTMLButtonElement;
 }
 
 const dom = getViewerDom();
@@ -45,8 +49,10 @@ async function main() {
   const renderOptions = {
     pointCloud: false,
     pointSize: 0.5,
+    stereoMode: 'off' as 'off' | 'anaglyph' | 'sbs',
   };
   const gui = createGui(renderOptions);
+  setupStereoButtons(dom, renderOptions);
 
   let cameras: CameraPose[] = [...DEFAULT_CAMERAS];
   let currentCameraIndex = 0;
@@ -190,12 +196,16 @@ async function main() {
 
     const viewProj = multiply4(projection, controls.viewMatrix);
     sortWorker.postViewProjection(viewProj);
+    const eyeOffset = renderOptions.stereoMode === 'anaglyph' ? 0.04 : 0.012;
     renderer.render({
       projection,
       view: controls.viewMatrix,
+      viewLeft: getEyeViewMatrix(controls.viewMatrix, -eyeOffset),
+      viewRight: getEyeViewMatrix(controls.viewMatrix, eyeOffset),
       focal: [controls.camera.fx, controls.camera.fy],
       pointCloudEnabled: renderOptions.pointCloud,
       pointSize: renderOptions.pointSize,
+      stereoMode: renderOptions.stereoMode,
     });
 
     const fps = 1000 / dtMs;
@@ -225,12 +235,23 @@ function getViewerDom(): ViewerDom {
   const progress = app.querySelector<HTMLDivElement>('#progress');
   const camId = app.querySelector<HTMLSpanElement>('#camid');
   const dropzone = app.querySelector<HTMLDivElement>('#dropzone');
+  const anaglyphButton = app.querySelector<HTMLButtonElement>('#btn-anaglyph');
+  const stereoButton = app.querySelector<HTMLButtonElement>('#btn-stereo');
 
-  if (!canvas || !message || !fps || !progress || !camId || !dropzone) {
+  if (
+    !canvas ||
+    !message ||
+    !fps ||
+    !progress ||
+    !camId ||
+    !dropzone ||
+    !anaglyphButton ||
+    !stereoButton
+  ) {
     throw new Error('Missing viewer DOM nodes');
   }
 
-  return { canvas, message, fps, progress, camId, dropzone };
+  return { canvas, message, fps, progress, camId, dropzone, anaglyphButton, stereoButton };
 }
 
 function normalizeIndex(index: number, size: number): number {
@@ -338,4 +359,38 @@ function createGui(renderOptions: { pointCloud: boolean; pointSize: number }) {
   gui.add(renderOptions, 'pointCloud').name('Point Cloud');
   gui.add(renderOptions, 'pointSize', 0.5, 6, 0.1).name('Point Size');
   return gui;
+}
+
+function getEyeViewMatrix(view: Mat4, eyeOffset: number): Mat4 {
+  const inv = invert4(view);
+  if (!inv) return view;
+  const shifted = translate4(inv, eyeOffset, 0, 0);
+  const out = invert4(shifted);
+  return out ?? view;
+}
+
+function setupStereoButtons(
+  viewerDom: ViewerDom,
+  renderOptions: { stereoMode: 'off' | 'anaglyph' | 'sbs' },
+) {
+  const updateUi = () => {
+    const anaglyphActive = renderOptions.stereoMode === 'anaglyph';
+    const stereoActive = renderOptions.stereoMode === 'sbs';
+    viewerDom.anaglyphButton.classList.toggle('active', anaglyphActive);
+    viewerDom.stereoButton.classList.toggle('active', stereoActive);
+    viewerDom.anaglyphButton.setAttribute('aria-pressed', String(anaglyphActive));
+    viewerDom.stereoButton.setAttribute('aria-pressed', String(stereoActive));
+  };
+
+  viewerDom.anaglyphButton.addEventListener('click', () => {
+    renderOptions.stereoMode = renderOptions.stereoMode === 'anaglyph' ? 'off' : 'anaglyph';
+    updateUi();
+  });
+
+  viewerDom.stereoButton.addEventListener('click', () => {
+    renderOptions.stereoMode = renderOptions.stereoMode === 'sbs' ? 'off' : 'sbs';
+    updateUi();
+  });
+
+  updateUi();
 }
