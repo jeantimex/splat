@@ -48,6 +48,16 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
     size: UNIFORM_BYTES,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
+  // Second uniform buffer for the right-eye stereo pass.
+  // Both eyes write different view matrices via device.queue.writeBuffer, which
+  // is a queue operation that executes before the command buffer submission.
+  // Using a single buffer causes the right-eye write to overwrite the left-eye
+  // write before either render pass reads it, making both eyes identical.
+  const uniformBufferB = device.createBuffer({
+    label: 'viewer uniforms B',
+    size: UNIFORM_BYTES,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
 
   // We render every splat as an instanced screen-space quad.
   // The vertex shader expands this quad into ellipse axes per instance.
@@ -86,17 +96,19 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
   });
 
   // Bind group is recreated whenever either storage buffer is reallocated.
-  const createBindGroup = () =>
+  // Accepts an optional uniform buffer so the right-eye pass can use its own.
+  const createBindGroup = (ub: GPUBuffer = uniformBuffer) =>
     device.createBindGroup({
       layout: bindGroupLayout,
       entries: [
-        { binding: 0, resource: { buffer: uniformBuffer } },
+        { binding: 0, resource: { buffer: ub } },
         { binding: 1, resource: { buffer: splatBuffer } },
         { binding: 2, resource: { buffer: sortedIndexBuffer } },
       ],
     });
 
   let bindGroup = createBindGroup();
+  let bindGroupB = createBindGroup(uniformBufferB);
 
   const createPipeline = (writeMask: GPUColorWriteFlags = GPUColorWrite.ALL) =>
     device.createRenderPipeline({
@@ -179,6 +191,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     bindGroup = createBindGroup();
+    bindGroupB = createBindGroup(uniformBufferB);
   };
 
   const ensureIndexCapacity = (requiredU32: number) => {
@@ -192,6 +205,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     bindGroup = createBindGroup();
+    bindGroupB = createBindGroup(uniformBufferB);
   };
 
   const resize = () => {
@@ -222,6 +236,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       view: Mat4,
       viewportWidth: number,
       viewportHeight: number,
+      ub: GPUBuffer = uniformBuffer,
     ) => {
       uniformData.set(projection, 0);
       uniformData.set(view, 16);
@@ -233,7 +248,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       uniformData[37] = state.pointSize;
       uniformData[38] = 0;
       uniformData[39] = 0;
-      device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+      device.queue.writeBuffer(ub, 0, uniformData);
     };
     const halfWidthProjection = (): Mat4 => {
       const adjusted = [...state.projection];
@@ -252,7 +267,11 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       viewportHeight: number;
       projection: Mat4;
       clear: boolean;
+      ub?: GPUBuffer;
+      bg?: GPUBindGroup;
     }) => {
+      const ub = params.ub ?? uniformBuffer;
+      const bg = params.bg ?? bindGroup;
       const pass = encoder.beginRenderPass({
         colorAttachments: [
           {
@@ -263,7 +282,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
           },
         ],
       });
-      pass.setBindGroup(0, bindGroup);
+      pass.setBindGroup(0, bg);
       pass.setVertexBuffer(0, quadVertexBuffer);
       pass.setViewport(
         params.viewportX,
@@ -273,7 +292,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
         0,
         1,
       );
-      writeUniforms(params.projection, params.view, params.viewportWidth, params.viewportHeight);
+      writeUniforms(params.projection, params.view, params.viewportWidth, params.viewportHeight, ub);
       pass.setPipeline(pipeline);
       pass.draw(4, instanceCount, 0, 0);
       pass.end();
@@ -289,6 +308,8 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
         viewportHeight: canvas.height,
         projection: state.projection,
         clear: true,
+        ub: uniformBuffer,
+        bg: bindGroup,
       });
       drawSplats({
         targetView: rightEyeTexture.createView(),
@@ -299,6 +320,8 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
         viewportHeight: canvas.height,
         projection: state.projection,
         clear: true,
+        ub: uniformBufferB,
+        bg: bindGroupB,
       });
 
       const compositePass = encoder.beginRenderPass({
@@ -328,6 +351,8 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
         viewportHeight: canvas.height,
         projection: projectionHalf,
         clear: true,
+        ub: uniformBuffer,
+        bg: bindGroup,
       });
       drawSplats({
         targetView: textureView,
@@ -338,6 +363,8 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
         viewportHeight: canvas.height,
         projection: projectionHalf,
         clear: false,
+        ub: uniformBufferB,
+        bg: bindGroupB,
       });
     } else if (instanceCount > 0) {
       drawSplats({
