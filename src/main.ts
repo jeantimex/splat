@@ -196,7 +196,7 @@ async function main() {
 
     const viewProj = multiply4(projection, controls.viewMatrix);
     sortWorker.postViewProjection(viewProj);
-    const eyeOffset = renderOptions.stereoMode === 'anaglyph' ? 0.04 : 0.012;
+    const eyeOffset = renderOptions.stereoMode === 'anaglyph' ? 0.04 : 0.065;
     renderer.render({
       projection,
       view: controls.viewMatrix,
