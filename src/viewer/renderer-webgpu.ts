@@ -2,6 +2,7 @@ import type { Mat4 } from './camera';
 import vertexShaderSource from './shaders/splat.vert.wgsl?raw';
 import fragmentShaderSource from './shaders/splat.frag.wgsl?raw';
 import anaglyphCompositeShaderSource from './shaders/anaglyph-composite.wgsl?raw';
+import crossfadeCompositeShaderSource from './shaders/crossfade-composite.wgsl?raw';
 
 // 2x mat4 + focal vec2 + viewport vec2 + render params vec4.
 // See WGSL Uniforms struct for exact layout.
@@ -14,7 +15,8 @@ export interface RenderState {
   viewLeft: Mat4;
   viewRight: Mat4;
   focal: [number, number];
-  pointCloudEnabled: boolean;
+  // 0 = full splat, 1 = full point cloud; values in between crossfade both layers.
+  transition: number;
   pointSize: number;
   stereoMode: 'off' | 'anaglyph' | 'sbs';
 }
@@ -43,21 +45,17 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
   const format = navigator.gpu.getPreferredCanvasFormat();
 
   // Single uniform buffer updated every frame.
-  const uniformBuffer = device.createBuffer({
-    label: 'viewer uniforms',
-    size: UNIFORM_BYTES,
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-  });
-  // Second uniform buffer for the right-eye stereo pass.
-  // Both eyes write different view matrices via device.queue.writeBuffer, which
-  // is a queue operation that executes before the command buffer submission.
-  // Using a single buffer causes the right-eye write to overwrite the left-eye
-  // write before either render pass reads it, making both eyes identical.
-  const uniformBufferB = device.createBuffer({
-    label: 'viewer uniforms B',
-    size: UNIFORM_BYTES,
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-  });
+  const makeUniformBuffer = (label: string) =>
+    device.createBuffer({
+      label,
+      size: UNIFORM_BYTES,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+  const uniformBuffer = makeUniformBuffer('viewer uniforms');
+  const uniformBufferB = makeUniformBuffer('viewer uniforms B');
+  const uniformBufferC = makeUniformBuffer('viewer uniforms C');
+  const uniformBufferD = makeUniformBuffer('viewer uniforms D');
 
   // We render every splat as an instanced screen-space quad.
   // The vertex shader expands this quad into ellipse axes per instance.
@@ -97,7 +95,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
 
   // Bind group is recreated whenever either storage buffer is reallocated.
   // Accepts an optional uniform buffer so the right-eye pass can use its own.
-  const createBindGroup = (ub: GPUBuffer = uniformBuffer) =>
+  const createBindGroup = (ub: GPUBuffer) =>
     device.createBindGroup({
       layout: bindGroupLayout,
       entries: [
@@ -107,8 +105,17 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       ],
     });
 
-  let bindGroup = createBindGroup();
+  const rebuildBindGroups = () => {
+    bindGroup = createBindGroup(uniformBuffer);
+    bindGroupB = createBindGroup(uniformBufferB);
+    bindGroupC = createBindGroup(uniformBufferC);
+    bindGroupD = createBindGroup(uniformBufferD);
+  };
+
+  let bindGroup = createBindGroup(uniformBuffer);
   let bindGroupB = createBindGroup(uniformBufferB);
+  let bindGroupC = createBindGroup(uniformBufferC);
+  let bindGroupD = createBindGroup(uniformBufferD);
 
   const createPipeline = (writeMask: GPUColorWriteFlags = GPUColorWrite.ALL) =>
     device.createRenderPipeline({
@@ -176,9 +183,40 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
     primitive: { topology: 'triangle-strip' },
   });
 
+  const crossfadeCompositeBindGroupLayout = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+      { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+      { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+    ],
+  });
+  const crossfadeCompositePipeline = device.createRenderPipeline({
+    layout: device.createPipelineLayout({ bindGroupLayouts: [crossfadeCompositeBindGroupLayout] }),
+    vertex: {
+      module: device.createShaderModule({ code: crossfadeCompositeShaderSource }),
+      entryPoint: 'vs_main',
+    },
+    fragment: {
+      module: device.createShaderModule({ code: crossfadeCompositeShaderSource }),
+      entryPoint: 'fs_main',
+      targets: [{ format }],
+    },
+    primitive: { topology: 'triangle-strip' },
+  });
+
+  const crossfadeUniformBuffer = device.createBuffer({
+    label: 'crossfade uniforms',
+    size: 16,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+
   let leftEyeTexture = createEyeTexture();
   let rightEyeTexture = createEyeTexture();
+  let offscreenSplatTexture = createEyeTexture();
+  let offscreenPointTexture = createEyeTexture();
   let anaglyphCompositeBindGroup = createAnaglyphCompositeBindGroup();
+  let crossfadeCompositeBindGroup = createCrossfadeCompositeBindGroup();
 
   const ensureSplatCapacity = (requiredU32: number) => {
     if (requiredU32 <= splatCapacity) return;
@@ -190,8 +228,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       size: splatCapacity * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
-    bindGroup = createBindGroup();
-    bindGroupB = createBindGroup(uniformBufferB);
+    rebuildBindGroups();
   };
 
   const ensureIndexCapacity = (requiredU32: number) => {
@@ -204,8 +241,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       size: indexCapacity * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
-    bindGroup = createBindGroup();
-    bindGroupB = createBindGroup(uniformBufferB);
+    rebuildBindGroups();
   };
 
   const resize = () => {
@@ -218,11 +254,15 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       format,
       alphaMode: 'premultiplied',
     });
-    leftEyeTexture.destroy();
-    rightEyeTexture.destroy();
+    [leftEyeTexture, rightEyeTexture, offscreenSplatTexture, offscreenPointTexture].forEach((t) =>
+      t.destroy(),
+    );
     leftEyeTexture = createEyeTexture();
     rightEyeTexture = createEyeTexture();
+    offscreenSplatTexture = createEyeTexture();
+    offscreenPointTexture = createEyeTexture();
     anaglyphCompositeBindGroup = createAnaglyphCompositeBindGroup();
+    crossfadeCompositeBindGroup = createCrossfadeCompositeBindGroup();
   };
 
   window.addEventListener('resize', resize);
@@ -231,12 +271,17 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
   const uniformData = new Float32Array(UNIFORM_FLOATS);
 
   const render = (state: RenderState) => {
+    // writeUniforms queues data to a specific uniform buffer.
+    // mode: 0 = splat, 1 = point cloud.
+    // opacity: per-pass opacity multiplier for crossfade (1 = fully visible).
     const writeUniforms = (
       projection: Mat4,
       view: Mat4,
       viewportWidth: number,
       viewportHeight: number,
-      ub: GPUBuffer = uniformBuffer,
+      mode: number,
+      opacity: number,
+      ub: GPUBuffer,
     ) => {
       uniformData.set(projection, 0);
       uniformData.set(view, 16);
@@ -244,9 +289,9 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       uniformData[33] = state.focal[1];
       uniformData[34] = viewportWidth;
       uniformData[35] = viewportHeight;
-      uniformData[36] = state.pointCloudEnabled ? 1 : 0;
+      uniformData[36] = mode;
       uniformData[37] = state.pointSize;
-      uniformData[38] = 0;
+      uniformData[38] = opacity;
       uniformData[39] = 0;
       device.queue.writeBuffer(ub, 0, uniformData);
     };
@@ -256,8 +301,12 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       return adjusted;
     };
 
+    const t = Math.max(0, Math.min(1, state.transition));
+    const isCrossfading = t > 0 && t < 1;
+
     const encoder = device.createCommandEncoder();
     const textureView = context.getCurrentTexture().createView();
+
     const drawSplats = (params: {
       targetView: GPUTextureView;
       view: Mat4;
@@ -267,11 +316,11 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       viewportHeight: number;
       projection: Mat4;
       clear: boolean;
-      ub?: GPUBuffer;
-      bg?: GPUBindGroup;
+      mode: number;
+      opacity: number;
+      ub: GPUBuffer;
+      bg: GPUBindGroup;
     }) => {
-      const ub = params.ub ?? uniformBuffer;
-      const bg = params.bg ?? bindGroup;
       const pass = encoder.beginRenderPass({
         colorAttachments: [
           {
@@ -282,7 +331,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
           },
         ],
       });
-      pass.setBindGroup(0, bg);
+      pass.setBindGroup(0, params.bg);
       pass.setVertexBuffer(0, quadVertexBuffer);
       pass.setViewport(
         params.viewportX,
@@ -292,37 +341,168 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
         0,
         1,
       );
-      writeUniforms(params.projection, params.view, params.viewportWidth, params.viewportHeight, ub);
+      writeUniforms(
+        params.projection,
+        params.view,
+        params.viewportWidth,
+        params.viewportHeight,
+        params.mode,
+        params.opacity,
+        params.ub,
+      );
       pass.setPipeline(pipeline);
       pass.draw(4, instanceCount, 0, 0);
       pass.end();
     };
 
+    // Draw a single eye viewpoint, handling the crossfade by issuing a second
+    // pass (point cloud, on top) when the transition is mid-flight.
+    const drawEye = (
+      targetView: GPUTextureView,
+      eyeView: Mat4,
+      x: number,
+      y: number,
+      w: number,
+      h: number,
+      projection: Mat4,
+      clearFirst: boolean,
+      ubSplat: GPUBuffer,
+      bgSplat: GPUBindGroup,
+      ubPoint: GPUBuffer,
+      bgPoint: GPUBindGroup,
+      forceTwoPass: boolean,
+    ) => {
+      if (!isCrossfading) {
+        // Steady state: single pass at full opacity in whichever mode is active.
+        const mode = t < 0.5 ? 0 : 1;
+        drawSplats({
+          targetView,
+          view: eyeView,
+          viewportX: x,
+          viewportY: y,
+          viewportWidth: w,
+          viewportHeight: h,
+          projection,
+          clear: clearFirst,
+          mode,
+          opacity: 1,
+          ub: mode === 0 ? ubSplat : ubPoint,
+          bg: mode === 0 ? bgSplat : bgPoint,
+        });
+      } else if (forceTwoPass) {
+        // Crossfade: splats drawn first (back), then point cloud on top.
+        // Used for SBS mode where we render directly to sub-viewports.
+        drawSplats({
+          targetView,
+          view: eyeView,
+          viewportX: x,
+          viewportY: y,
+          viewportWidth: w,
+          viewportHeight: h,
+          projection,
+          clear: clearFirst,
+          mode: 0,
+          opacity: 1 - t,
+          ub: ubSplat,
+          bg: bgSplat,
+        });
+        drawSplats({
+          targetView,
+          view: eyeView,
+          viewportX: x,
+          viewportY: y,
+          viewportWidth: w,
+          viewportHeight: h,
+          projection,
+          clear: false,
+          mode: 1,
+          opacity: t,
+          ub: ubPoint,
+          bg: bgPoint,
+        });
+      } else {
+        // High-quality crossfade: render each layer at full opacity to off-screen textures,
+        // then composite them using the mix() shader.
+        device.queue.writeBuffer(crossfadeUniformBuffer, 0, new Float32Array([t]));
+
+        drawSplats({
+          targetView: offscreenSplatTexture.createView(),
+          view: eyeView,
+          viewportX: 0,
+          viewportY: 0,
+          viewportWidth: w,
+          viewportHeight: h,
+          projection,
+          clear: true,
+          mode: 0,
+          opacity: 1,
+          ub: ubSplat,
+          bg: bgSplat,
+        });
+        drawSplats({
+          targetView: offscreenPointTexture.createView(),
+          view: eyeView,
+          viewportX: 0,
+          viewportY: 0,
+          viewportWidth: w,
+          viewportHeight: h,
+          projection,
+          clear: true,
+          mode: 1,
+          opacity: 1,
+          ub: ubPoint,
+          bg: bgPoint,
+        });
+
+        const compositePass = encoder.beginRenderPass({
+          colorAttachments: [
+            {
+              view: targetView,
+              clearValue: { r: 0, g: 0, b: 0, a: 1 },
+              loadOp: clearFirst ? 'clear' : 'load',
+              storeOp: 'store',
+            },
+          ],
+        });
+        compositePass.setPipeline(crossfadeCompositePipeline);
+        compositePass.setBindGroup(0, crossfadeCompositeBindGroup);
+        compositePass.setViewport(x, y, w, h, 0, 1);
+        compositePass.draw(4, 1, 0, 0);
+        compositePass.end();
+      }
+    };
+
     if (instanceCount > 0 && state.stereoMode === 'anaglyph') {
-      drawSplats({
-        targetView: leftEyeTexture.createView(),
-        view: state.viewLeft,
-        viewportX: 0,
-        viewportY: 0,
-        viewportWidth: canvas.width,
-        viewportHeight: canvas.height,
-        projection: state.projection,
-        clear: true,
-        ub: uniformBuffer,
-        bg: bindGroup,
-      });
-      drawSplats({
-        targetView: rightEyeTexture.createView(),
-        view: state.viewRight,
-        viewportX: 0,
-        viewportY: 0,
-        viewportWidth: canvas.width,
-        viewportHeight: canvas.height,
-        projection: state.projection,
-        clear: true,
-        ub: uniformBufferB,
-        bg: bindGroupB,
-      });
+      drawEye(
+        leftEyeTexture.createView(),
+        state.viewLeft,
+        0,
+        0,
+        canvas.width,
+        canvas.height,
+        state.projection,
+        true,
+        uniformBuffer,
+        bindGroup,
+        uniformBufferC,
+        bindGroupC,
+        false,
+      );
+      drawEye(
+        rightEyeTexture.createView(),
+        state.viewRight,
+        0,
+        0,
+        canvas.width,
+        canvas.height,
+        state.projection,
+        true,
+        uniformBufferB,
+        bindGroupB,
+        uniformBufferD,
+        bindGroupD,
+        false,
+      );
 
       const compositePass = encoder.beginRenderPass({
         colorAttachments: [
@@ -342,41 +522,52 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       const halfWidth = Math.max(1, Math.floor(canvas.width / 2));
       const projectionHalf = halfWidthProjection();
 
-      drawSplats({
-        targetView: textureView,
-        view: state.viewLeft,
-        viewportX: 0,
-        viewportY: 0,
-        viewportWidth: halfWidth,
-        viewportHeight: canvas.height,
-        projection: projectionHalf,
-        clear: true,
-        ub: uniformBuffer,
-        bg: bindGroup,
-      });
-      drawSplats({
-        targetView: textureView,
-        view: state.viewRight,
-        viewportX: halfWidth,
-        viewportY: 0,
-        viewportWidth: canvas.width - halfWidth,
-        viewportHeight: canvas.height,
-        projection: projectionHalf,
-        clear: false,
-        ub: uniformBufferB,
-        bg: bindGroupB,
-      });
+      drawEye(
+        textureView,
+        state.viewLeft,
+        0,
+        0,
+        halfWidth,
+        canvas.height,
+        projectionHalf,
+        true,
+        uniformBuffer,
+        bindGroup,
+        uniformBufferC,
+        bindGroupC,
+        true,
+      );
+      drawEye(
+        textureView,
+        state.viewRight,
+        halfWidth,
+        0,
+        canvas.width - halfWidth,
+        canvas.height,
+        projectionHalf,
+        false,
+        uniformBufferB,
+        bindGroupB,
+        uniformBufferD,
+        bindGroupD,
+        true,
+      );
     } else if (instanceCount > 0) {
-      drawSplats({
-        targetView: textureView,
-        view: state.view,
-        viewportX: 0,
-        viewportY: 0,
-        viewportWidth: canvas.width,
-        viewportHeight: canvas.height,
-        projection: state.projection,
-        clear: true,
-      });
+      drawEye(
+        textureView,
+        state.view,
+        0,
+        0,
+        canvas.width,
+        canvas.height,
+        state.projection,
+        true,
+        uniformBuffer,
+        bindGroup,
+        uniformBufferC,
+        bindGroupC,
+        false,
+      );
     } else {
       const emptyPass = encoder.beginRenderPass({
         colorAttachments: [
@@ -437,6 +628,18 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
         { binding: 0, resource: anaglyphSampler },
         { binding: 1, resource: leftEyeTexture.createView() },
         { binding: 2, resource: rightEyeTexture.createView() },
+      ],
+    });
+  }
+
+  function createCrossfadeCompositeBindGroup() {
+    return device.createBindGroup({
+      layout: crossfadeCompositeBindGroupLayout,
+      entries: [
+        { binding: 0, resource: anaglyphSampler },
+        { binding: 1, resource: offscreenSplatTexture.createView() },
+        { binding: 2, resource: offscreenPointTexture.createView() },
+        { binding: 3, resource: { buffer: crossfadeUniformBuffer } },
       ],
     });
   }

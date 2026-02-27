@@ -6,9 +6,8 @@ struct Uniforms {
   focal: vec2<f32>,
   // Canvas size in physical pixels.
   viewport: vec2<f32>,
-  // x: render mode (0=splat, 1=point), y: point size in pixels.
-  render_params: vec2<f32>,
-  _padding: vec2<f32>,
+  // x: render mode (0=splat, 1=point), y: point size, z: opacity multiplier, w: unused.
+  render_params: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -25,6 +24,7 @@ struct VSOut {
   @location(0) v_color: vec4<f32>,
   @location(1) v_position: vec2<f32>,
   @location(2) v_mode: f32,
+  @location(3) v_opacity: f32,
 }
 
 @vertex
@@ -43,9 +43,12 @@ fn vs_main(input: VSIn) -> VSOut {
   let cam = uniforms.view * vec4<f32>(center, 1.0);
   let pos2d = uniforms.projection * cam;
 
-  // Cheap clip rejection before covariance math.
+  // Robust culling: reject splats behind or too close to the near plane (cam.z is depth).
+  // Also reject if W is non-positive or coordinates are far outside NDC bounds.
   let clip = 1.2 * pos2d.w;
   if (
+    cam.z < 0.01 ||
+    pos2d.w <= 0.0 ||
     pos2d.z < -clip ||
     pos2d.x < -clip || pos2d.x > clip ||
     pos2d.y < -clip || pos2d.y > clip
@@ -53,8 +56,9 @@ fn vs_main(input: VSIn) -> VSOut {
     var culled: VSOut;
     culled.position = vec4<f32>(0.0, 0.0, 2.0, 1.0);
     culled.v_color = vec4<f32>(0.0);
-    culled.v_position = input.quad_pos;
+    culled.v_position = vec2<f32>(0.0);
     culled.v_mode = uniforms.render_params.x;
+    culled.v_opacity = 0.0;
     return culled;
   }
 
@@ -67,7 +71,7 @@ fn vs_main(input: VSIn) -> VSOut {
     f32((packed_color >> 24u) & 0xffu)
   ) / 255.0;
 
-  let depth_tint = clamp(pos2d.z / pos2d.w + 1.0, 0.0, 1.0);
+  let depth_tint = 1.0;
   let center_ndc = pos2d.xy / pos2d.w;
   let point_mode = uniforms.render_params.x;
 
@@ -112,8 +116,9 @@ fn vs_main(input: VSIn) -> VSOut {
       var rejected: VSOut;
       rejected.position = vec4<f32>(0.0, 0.0, 2.0, 1.0);
       rejected.v_color = vec4<f32>(0.0);
-      rejected.v_position = input.quad_pos;
+      rejected.v_position = vec2<f32>(0.0);
       rejected.v_mode = point_mode;
+      rejected.v_opacity = 0.0;
       return rejected;
     }
 
@@ -126,6 +131,7 @@ fn vs_main(input: VSIn) -> VSOut {
   out.v_color = color * depth_tint;
   out.v_position = input.quad_pos;
   out.v_mode = point_mode;
+  out.v_opacity = uniforms.render_params.z;
   out.position = vec4<f32>(
     center_ndc
       + input.quad_pos.x * major_axis / uniforms.viewport

@@ -57,6 +57,8 @@ async function main() {
   let cameras: CameraPose[] = [...DEFAULT_CAMERAS];
   let currentCameraIndex = 0;
   let loadedVertices = 0;
+  // Animated crossfade value: 0 = full splat, 1 = full point cloud.
+  let pcTransition = 0;
 
   // Applies one camera preset (intrinsics + pose) to the live controls.
   // We also stop carousel mode so preset selection is deterministic.
@@ -187,6 +189,21 @@ async function main() {
 
     controls.update(dtMs);
 
+    // Animate the splat ↔ point-cloud crossfade at ~500 ms total duration.
+    const pcTarget = renderOptions.pointCloud ? 1 : 0;
+    if (pcTransition !== pcTarget) {
+      const step = (dtMs / 500) * Math.sign(pcTarget - pcTransition);
+      pcTransition =
+        pcTarget > pcTransition
+          ? Math.min(pcTarget, pcTransition + step)
+          : Math.max(pcTarget, pcTransition + step);
+
+      // Snap to target to avoid floating point drift keeps isCrossfading=true.
+      if (Math.abs(pcTransition - pcTarget) < 0.001) {
+        pcTransition = pcTarget;
+      }
+    }
+
     const projection = getProjectionMatrix(
       controls.camera.fx,
       controls.camera.fy,
@@ -203,7 +220,7 @@ async function main() {
       viewLeft: getEyeViewMatrix(controls.viewMatrix, -eyeOffset),
       viewRight: getEyeViewMatrix(controls.viewMatrix, eyeOffset),
       focal: [controls.camera.fx, controls.camera.fy],
-      pointCloudEnabled: renderOptions.pointCloud,
+      transition: pcTransition,
       pointSize: renderOptions.pointSize,
       stereoMode: renderOptions.stereoMode,
     });
