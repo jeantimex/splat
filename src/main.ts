@@ -1,4 +1,5 @@
 import './style.css';
+import GUI from 'lil-gui';
 import { createControls } from './viewer/controls';
 import { createWebGPURenderer } from './viewer/renderer-webgpu';
 import {
@@ -33,6 +34,11 @@ async function main() {
 
   const renderer = await createWebGPURenderer(dom.canvas);
   const controls = createControls(dom.canvas);
+  const renderOptions = {
+    pointCloud: false,
+    pointSize: 0.5,
+  };
+  const gui = createGui(renderOptions);
 
   let cameras: CameraPose[] = [...DEFAULT_CAMERAS];
   let currentCameraIndex = 0;
@@ -183,6 +189,8 @@ async function main() {
       projection,
       view: controls.viewMatrix,
       focal: [controls.camera.fx, controls.camera.fy],
+      pointCloudEnabled: renderOptions.pointCloud,
+      pointSize: renderOptions.pointSize,
     });
 
     const fps = 1000 / dtMs;
@@ -192,6 +200,7 @@ async function main() {
   };
 
   window.addEventListener('beforeunload', () => sortWorker.terminate());
+  window.addEventListener('beforeunload', () => gui.destroy());
   requestAnimationFrame(frame);
 }
 
@@ -308,4 +317,11 @@ function registerDragDrop(params: { onFile: (file: File) => Promise<void> }) {
     if (!file) return;
     void onFile(file);
   });
+}
+
+function createGui(renderOptions: { pointCloud: boolean; pointSize: number }) {
+  const gui = new GUI({ title: 'Render' });
+  gui.add(renderOptions, 'pointCloud').name('Point Cloud');
+  gui.add(renderOptions, 'pointSize', 0.5, 6, 0.1).name('Point Size');
+  return gui;
 }

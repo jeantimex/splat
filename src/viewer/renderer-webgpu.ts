@@ -2,13 +2,15 @@ import type { Mat4 } from './camera';
 import vertexShaderSource from './shaders/splat.vert.wgsl?raw';
 import fragmentShaderSource from './shaders/splat.frag.wgsl?raw';
 
-const UNIFORM_FLOATS = 36;
+const UNIFORM_FLOATS = 40;
 const UNIFORM_BYTES = UNIFORM_FLOATS * 4;
 
 export interface RenderState {
   projection: Mat4;
   view: Mat4;
   focal: [number, number];
+  pointCloudEnabled: boolean;
+  pointSize: number;
 }
 
 export interface WebGPURenderer {
@@ -160,6 +162,10 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
     uniformData[33] = state.focal[1];
     uniformData[34] = canvas.width;
     uniformData[35] = canvas.height;
+    uniformData[36] = state.pointCloudEnabled ? 1 : 0;
+    uniformData[37] = state.pointSize;
+    uniformData[38] = 0;
+    uniformData[39] = 0;
     device.queue.writeBuffer(uniformBuffer, 0, uniformData);
 
     const encoder = device.createCommandEncoder();
