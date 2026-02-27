@@ -199,13 +199,56 @@ function processPlyBuffer(inputBuffer: ArrayBuffer): ArrayBuffer {
   const headerEndIndex = header.indexOf(headerEnd);
   if (headerEndIndex < 0) throw new Error('Unable to read .ply file header');
 
-  const vertexMatch = /element vertex (\d+)\n/.exec(header);
-  if (!vertexMatch) throw new Error('Unable to parse PLY vertex count');
-  const plyVertexCount = Number.parseInt(vertexMatch[1], 10);
+  const headerLines = header.slice(0, headerEndIndex).split('\n');
+  const elements: Array<{
+    name: string;
+    count: number;
+    properties: Array<{ type: string; name: string }>;
+  }> = [];
+  let currentElement:
+    | {
+        name: string;
+        count: number;
+        properties: Array<{ type: string; name: string }>;
+      }
+    | undefined;
 
-  let rowOffset = 0;
-  const offsets: Record<string, number> = {};
-  const types: Record<string, string> = {};
+  for (const line of headerLines) {
+    if (line.startsWith('element ')) {
+      const [, name, count] = line.split(/\s+/);
+      currentElement = { name, count: Number.parseInt(count, 10), properties: [] };
+      elements.push(currentElement);
+      continue;
+    }
+    if (line.startsWith('property ') && currentElement) {
+      const [, type, name] = line.split(/\s+/);
+      currentElement.properties.push({ type, name });
+    }
+  }
+
+  const vertexElement = elements.find((element) => element.name === 'vertex');
+  if (!vertexElement) throw new Error('Unable to parse PLY vertex element');
+
+  const isCompressedPly = vertexElement.properties.some(
+    (property) => property.name === 'packed_position',
+  );
+  if (isCompressedPly) {
+    return processCompressedPlyBuffer(inputBuffer, elements, headerEndIndex + headerEnd.length);
+  }
+
+  return processStandardPlyBuffer(inputBuffer, vertexElement, headerEndIndex + headerEnd.length);
+}
+
+function processStandardPlyBuffer(
+  inputBuffer: ArrayBuffer,
+  vertexElement: {
+    name: string;
+    count: number;
+    properties: Array<{ type: string; name: string }>;
+  },
+  vertexDataStart: number,
+): ArrayBuffer {
+  const plyVertexCount = vertexElement.count;
   const typeMap: Record<string, string> = {
     double: 'getFloat64',
     int: 'getInt32',
@@ -216,20 +259,18 @@ function processPlyBuffer(inputBuffer: ArrayBuffer): ArrayBuffer {
     uchar: 'getUint8',
   };
 
-  const props = header
-    .slice(0, headerEndIndex)
-    .split('\n')
-    .filter((line) => line.startsWith('property '));
+  let rowOffset = 0;
+  const offsets: Record<string, number> = {};
+  const types: Record<string, string> = {};
 
-  for (const prop of props) {
-    const [, type, name] = prop.split(' ');
-    const getter = typeMap[type] ?? 'getInt8';
-    types[name] = getter;
-    offsets[name] = rowOffset;
+  for (const property of vertexElement.properties) {
+    const getter = typeMap[property.type] ?? 'getInt8';
+    types[property.name] = getter;
+    offsets[property.name] = rowOffset;
     rowOffset += Number.parseInt(getter.replace(/[^\d]/g, ''), 10) / 8;
   }
 
-  const dataView = new DataView(inputBuffer, headerEndIndex + headerEnd.length);
+  const dataView = new DataView(inputBuffer, vertexDataStart);
   let row = 0;
   const attrs = new Proxy<Record<string, number>>(
     {},
@@ -304,7 +345,137 @@ function processPlyBuffer(inputBuffer: ArrayBuffer): ArrayBuffer {
     }
     rgba[3] = types.opacity ? (1 / (1 + Math.exp(-attrs.opacity))) * 255 : 255;
   }
+
   return output;
+}
+
+function processCompressedPlyBuffer(
+  inputBuffer: ArrayBuffer,
+  elements: Array<{
+    name: string;
+    count: number;
+    properties: Array<{ type: string; name: string }>;
+  }>,
+  dataStart: number,
+): ArrayBuffer {
+  const chunkElement = elements.find((element) => element.name === 'chunk');
+  const vertexElement = elements.find((element) => element.name === 'vertex');
+  if (!chunkElement || !vertexElement) {
+    throw new Error('Compressed PLY missing chunk/vertex elements');
+  }
+
+  const chunkCount = chunkElement.count;
+  const vertexCount = vertexElement.count;
+  const chunkStride = 18 * 4;
+  const vertexStride = 4 * 4;
+  const vertexStart = dataStart + chunkCount * chunkStride;
+  const dv = new DataView(inputBuffer);
+
+  const output = new ArrayBuffer(ROW_BYTES * vertexCount);
+  const q11Max = 2047;
+  const q10Max = 1023;
+  const sqrt2 = 1.4142135623730951;
+
+  for (let i = 0; i < vertexCount; i++) {
+    const chunkIndex = i >> 8;
+    const chunkBase = dataStart + chunkIndex * chunkStride;
+    const vertexBase = vertexStart + i * vertexStride;
+
+    const minX = dv.getFloat32(chunkBase + 0, true);
+    const minY = dv.getFloat32(chunkBase + 4, true);
+    const minZ = dv.getFloat32(chunkBase + 8, true);
+    const maxX = dv.getFloat32(chunkBase + 12, true);
+    const maxY = dv.getFloat32(chunkBase + 16, true);
+    const maxZ = dv.getFloat32(chunkBase + 20, true);
+
+    const minScaleX = dv.getFloat32(chunkBase + 24, true);
+    const minScaleY = dv.getFloat32(chunkBase + 28, true);
+    const minScaleZ = dv.getFloat32(chunkBase + 32, true);
+    const maxScaleX = dv.getFloat32(chunkBase + 36, true);
+    const maxScaleY = dv.getFloat32(chunkBase + 40, true);
+    const maxScaleZ = dv.getFloat32(chunkBase + 44, true);
+
+    const minR = dv.getFloat32(chunkBase + 48, true);
+    const minG = dv.getFloat32(chunkBase + 52, true);
+    const minB = dv.getFloat32(chunkBase + 56, true);
+    const maxR = dv.getFloat32(chunkBase + 60, true);
+    const maxG = dv.getFloat32(chunkBase + 64, true);
+    const maxB = dv.getFloat32(chunkBase + 68, true);
+
+    const packedPosition = dv.getUint32(vertexBase + 0, true);
+    const packedRotation = dv.getUint32(vertexBase + 4, true);
+    const packedScale = dv.getUint32(vertexBase + 8, true);
+    const packedColor = dv.getUint32(vertexBase + 12, true);
+
+    const px = (packedPosition >> 21) & 0x7ff;
+    const py = (packedPosition >> 11) & 0x3ff;
+    const pz = packedPosition & 0x7ff;
+
+    const sx = (packedScale >> 21) & 0x7ff;
+    const sy = (packedScale >> 11) & 0x3ff;
+    const sz = packedScale & 0x7ff;
+
+    const position = new Float32Array(output, i * ROW_BYTES, 3);
+    position[0] = minX + (px / q11Max) * (maxX - minX);
+    position[1] = minY + (py / q10Max) * (maxY - minY);
+    position[2] = minZ + (pz / q11Max) * (maxZ - minZ);
+
+    const scales = new Float32Array(output, i * ROW_BYTES + 12, 3);
+    const logScaleX = minScaleX + (sx / q11Max) * (maxScaleX - minScaleX);
+    const logScaleY = minScaleY + (sy / q10Max) * (maxScaleY - minScaleY);
+    const logScaleZ = minScaleZ + (sz / q11Max) * (maxScaleZ - minScaleZ);
+    scales[0] = Math.max(1e-6, Math.exp(logScaleX));
+    scales[1] = Math.max(1e-6, Math.exp(logScaleY));
+    scales[2] = Math.max(1e-6, Math.exp(logScaleZ));
+
+    const rgba = new Uint8ClampedArray(output, i * ROW_BYTES + 24, 4);
+    const cr = (packedColor >> 24) & 0xff;
+    const cg = (packedColor >> 16) & 0xff;
+    const cb = (packedColor >> 8) & 0xff;
+    const co = packedColor & 0xff;
+    const colorR = minR + (cr / 255) * (maxR - minR);
+    const colorG = minG + (cg / 255) * (maxG - minG);
+    const colorB = minB + (cb / 255) * (maxB - minB);
+    rgba[0] = clamp255(colorR * 255);
+    rgba[1] = clamp255(colorG * 255);
+    rgba[2] = clamp255(colorB * 255);
+    rgba[3] = co;
+
+    const rot = new Uint8ClampedArray(output, i * ROW_BYTES + 28, 4);
+    const quat = decodePackedQuaternion(packedRotation, sqrt2);
+    rot[0] = clamp255(quat[0] * 128 + 128);
+    rot[1] = clamp255(quat[1] * 128 + 128);
+    rot[2] = clamp255(quat[2] * 128 + 128);
+    rot[3] = clamp255(quat[3] * 128 + 128);
+  }
+
+  return output;
+}
+
+function decodePackedQuaternion(packed: number, sqrt2: number): [number, number, number, number] {
+  const largestIndex = (packed >> 30) & 0x3;
+  const a = (packed >> 20) & 0x3ff;
+  const b = (packed >> 10) & 0x3ff;
+  const c = packed & 0x3ff;
+  const v0 = (a / 1023 - 0.5) * sqrt2;
+  const v1 = (b / 1023 - 0.5) * sqrt2;
+  const v2 = (c / 1023 - 0.5) * sqrt2;
+
+  const quat: [number, number, number, number] = [0, 0, 0, 0];
+  const rem = [v0, v1, v2];
+  let remIdx = 0;
+  for (let i = 0; i < 4; i++) {
+    if (i === largestIndex) continue;
+    quat[i] = rem[remIdx++];
+  }
+
+  const sumSquares = quat[0] ** 2 + quat[1] ** 2 + quat[2] ** 2 + quat[3] ** 2;
+  quat[largestIndex] = Math.sqrt(Math.max(0, 1 - sumSquares));
+  return quat;
+}
+
+function clamp255(value: number): number {
+  return Math.max(0, Math.min(255, Math.round(value)));
 }
 
 function throttledSort() {
