@@ -83,9 +83,16 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
 
   canvas.addEventListener('mousemove', (event) => {
     if (!isDragging) return;
+    event.preventDefault();
 
     const dx = (event.clientX - lastX) / Math.max(window.innerWidth, 1);
     const dy = (event.clientY - lastY) / Math.max(window.innerHeight, 1);
+
+    lastX = event.clientX;
+    lastY = event.clientY;
+    lastDragMoveAt = performance.now();
+
+    if (Math.abs(dx) < 1e-10 && Math.abs(dy) < 1e-10) return;
 
     const inv = invert4(viewMatrix);
     if (!inv) return;
@@ -97,7 +104,12 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
       // viewMatrix[4..6] is the world Y axis [0,1,0] expressed in camera-local
       // coordinates. Using camera-local Y (0,1,0) instead would cause the
       // horizon to roll whenever the camera is pitched up or down.
-      next = rotate4(next, 5 * dx, viewMatrix[4], viewMatrix[5], viewMatrix[6]);
+      // We normalize the axis to prevent drift-induced scaling.
+      const axisY = [viewMatrix[4], viewMatrix[5], viewMatrix[6]];
+      const axisYLen = Math.hypot(axisY[0], axisY[1], axisY[2]);
+      if (axisYLen > 1e-6) {
+        next = rotate4(next, 5 * dx, axisY[0] / axisYLen, axisY[1] / axisYLen, axisY[2] / axisYLen);
+      }
       next = rotate4(next, -5 * dy, 1, 0, 0);
       next = translate4(next, 0, 0, -d);
       const out = invert4(next);
@@ -116,10 +128,6 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
       if (out) viewMatrix = out;
       panVelocity = { dx, dy };
     }
-
-    lastX = event.clientX;
-    lastY = event.clientY;
-    lastDragMoveAt = performance.now();
   });
 
   window.addEventListener(
@@ -147,7 +155,8 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
     }
 
     // Frame-rate independent exponential decay.
-    const decay = Math.pow(INERTIA_DECAY, dtMs / (1000 / 60));
+    const dtFactor = dtMs / (1000 / 60);
+    const decay = Math.pow(INERTIA_DECAY, dtFactor);
 
     // Orbit inertia — only while the mouse is released.
     if (!isDragging && (Math.abs(orbitVelocity.dx) > 1e-5 || Math.abs(orbitVelocity.dy) > 1e-5)) {
@@ -155,8 +164,19 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
       if (inv) {
         const d = 4;
         let next = translate4(inv, 0, 0, d);
-        next = rotate4(next, 5 * orbitVelocity.dx, viewMatrix[4], viewMatrix[5], viewMatrix[6]);
-        next = rotate4(next, -5 * orbitVelocity.dy, 1, 0, 0);
+        // Apply velocity proportional to dtFactor for frame-rate independence.
+        const axisY = [viewMatrix[4], viewMatrix[5], viewMatrix[6]];
+        const axisYLen = Math.hypot(axisY[0], axisY[1], axisY[2]);
+        if (axisYLen > 1e-6) {
+          next = rotate4(
+            next,
+            5 * orbitVelocity.dx * dtFactor,
+            axisY[0] / axisYLen,
+            axisY[1] / axisYLen,
+            axisY[2] / axisYLen,
+          );
+        }
+        next = rotate4(next, -5 * orbitVelocity.dy * dtFactor, 1, 0, 0);
         next = translate4(next, 0, 0, -d);
         const out = invert4(next);
         if (out) viewMatrix = out;
@@ -169,7 +189,7 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
     if (!isDragging && Math.abs(rollVelocity) > 1e-5) {
       const inv = invert4(viewMatrix);
       if (inv) {
-        const out = invert4(rotate4(inv, 5 * rollVelocity, 0, 0, 1));
+        const out = invert4(rotate4(inv, 5 * rollVelocity * dtFactor, 0, 0, 1));
         if (out) viewMatrix = out;
       }
       rollVelocity *= decay;
@@ -179,7 +199,12 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
     if (!isDragging && (Math.abs(panVelocity.dx) > 1e-5 || Math.abs(panVelocity.dy) > 1e-5)) {
       const inv = invert4(viewMatrix);
       if (inv) {
-        const next = translate4(inv, -10 * panVelocity.dx, -10 * panVelocity.dy, 0);
+        const next = translate4(
+          inv,
+          -10 * panVelocity.dx * dtFactor,
+          -10 * panVelocity.dy * dtFactor,
+          0,
+        );
         const out = invert4(next);
         if (out) viewMatrix = out;
       }
@@ -192,11 +217,13 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
     if (Math.abs(scrollVelocity) > 1e-5) {
       const inv = invert4(viewMatrix);
       if (inv) {
-        const next = translate4(inv, 0, 0, scrollVelocity);
+        // Scroll velocity is already delta-based, but we scale it by dtFactor
+        // for consistent application during decay.
+        const next = translate4(inv, 0, 0, scrollVelocity * dtFactor);
         const out = invert4(next);
         if (out) viewMatrix = out;
       }
-      scrollVelocity *= Math.pow(SCROLL_DECAY, dtMs / (1000 / 60));
+      scrollVelocity *= Math.pow(SCROLL_DECAY, dtFactor);
     }
 
     // Keyboard controls.
