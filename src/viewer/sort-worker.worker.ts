@@ -37,7 +37,6 @@ let lastProj: number[] = [];
 let lastVertexCount = -1;
 let sortRunning = false;
 let sizeList = new Int32Array(0);
-let visibleIndices = new Uint32Array(0);
 const counts0 = new Uint32Array(256 * 256);
 const starts0 = new Uint32Array(256 * 256);
 
@@ -155,77 +154,39 @@ function runSort(proj: number[]) {
   const fBuffer = new Float32Array(sourceBuffer);
 
   if (lastVertexCount === vertexCount) {
+    // Skip sort when view direction barely changed.
     const dot = lastProj[2] * proj[2] + lastProj[6] * proj[6] + lastProj[10] * proj[10];
-    if (Math.abs(dot - 1) < 0.01) {
-      const distSq =
-        (lastProj[12] - proj[12]) ** 2 +
-        (lastProj[13] - proj[13]) ** 2 +
-        (lastProj[14] - proj[14]) ** 2;
-      if (distSq < 0.0001) return;
-    }
+    if (Math.abs(dot - 1) < 0.01) return;
   } else {
     postSplatPayload();
     lastVertexCount = vertexCount;
   }
 
-  // Frustum planes from column-major View-Projection matrix.
-  const planes = [
-    [proj[3] + proj[0], proj[7] + proj[4], proj[11] + proj[8], proj[15] + proj[12]], // Left
-    [proj[3] - proj[0], proj[7] - proj[4], proj[11] - proj[8], proj[15] - proj[12]], // Right
-    [proj[3] + proj[1], proj[7] + proj[5], proj[11] + proj[9], proj[15] + proj[13]], // Bottom
-    [proj[3] - proj[1], proj[7] - proj[5], proj[11] - proj[9], proj[15] - proj[13]], // Top
-    [proj[2], proj[6], proj[10], proj[14]], // Near
-    [proj[3] - proj[2], proj[7] - proj[6], proj[11] - proj[10], proj[15] - proj[14]], // Far
-  ];
-
+  // Project centers to a scalar depth key in view-projection space.
   let maxDepth = -Infinity;
   let minDepth = Infinity;
   if (sizeList.length < vertexCount) {
     sizeList = new Int32Array(vertexCount);
-    visibleIndices = new Uint32Array(vertexCount);
   }
 
-  let visibleCount = 0;
   for (let i = 0; i < vertexCount; i++) {
-    const x = fBuffer[8 * i + 0];
-    const y = fBuffer[8 * i + 1];
-    const z = fBuffer[8 * i + 2];
+    const depth =
+      ((proj[2] * fBuffer[8 * i + 0] +
+        proj[6] * fBuffer[8 * i + 1] +
+        proj[10] * fBuffer[8 * i + 2]) *
+        4096) |
+      0;
 
-    // Simple point-in-frustum check with a generous margin for splat size.
-    let isVisible = true;
-    for (let p = 0; p < 6; p++) {
-      const plane = planes[p];
-      if (plane[0] * x + plane[1] * y + plane[2] * z + plane[3] < -1.0) {
-        isVisible = false;
-        break;
-      }
-    }
-    if (!isVisible) continue;
-
-    visibleIndices[visibleCount++] = i;
-
-    const depth = ((proj[2] * x + proj[6] * y + proj[10] * z) * 4096) | 0;
     sizeList[i] = depth;
     if (depth > maxDepth) maxDepth = depth;
     if (depth < minDepth) minDepth = depth;
   }
 
-  if (visibleCount === 0) {
-    const msg: WorkerToMainDepth = {
-      type: 'depth',
-      depthIndex: new Uint32Array(0).buffer,
-      vertexCount: 0,
-      sortMs: performance.now() - sortStart,
-    };
-    ctx.postMessage(msg, [msg.depthIndex]);
-    return;
-  }
-
-  // 16-bit counting sort on visible set only:
+  // 16-bit counting sort:
+  // fast enough for large splat sets and stable for alpha blending order.
   const depthInv = (256 * 256 - 1) / (maxDepth - minDepth || 1);
   counts0.fill(0);
-  for (let j = 0; j < visibleCount; j++) {
-    const i = visibleIndices[j];
+  for (let i = 0; i < vertexCount; i++) {
     sizeList[i] = ((sizeList[i] - minDepth) * depthInv) | 0;
     counts0[sizeList[i]]++;
   }
@@ -235,9 +196,8 @@ function runSort(proj: number[]) {
     starts0[i] = starts0[i - 1] + counts0[i - 1];
   }
 
-  const depthIndex = new Uint32Array(visibleCount);
-  for (let j = 0; j < visibleCount; j++) {
-    const i = visibleIndices[j];
+  const depthIndex = new Uint32Array(vertexCount);
+  for (let i = 0; i < vertexCount; i++) {
     depthIndex[starts0[sizeList[i]]++] = i;
   }
 
@@ -245,7 +205,7 @@ function runSort(proj: number[]) {
   const msg: WorkerToMainDepth = {
     type: 'depth',
     depthIndex: depthIndex.buffer,
-    vertexCount: visibleCount,
+    vertexCount,
     sortMs: performance.now() - sortStart,
   };
   ctx.postMessage(msg, [depthIndex.buffer]);
