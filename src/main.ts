@@ -59,6 +59,10 @@ async function main() {
   let loadedVertices = 0;
   // Animated crossfade value: 0 = full splat, 1 = full point cloud.
   let pcTransition = 0;
+  let renderScale = 1;
+  let lastCameraMotionAt = performance.now();
+  let lastScaleChangeAt = 0;
+  const previousViewMatrix: Mat4 = [...controls.viewMatrix];
 
   // Applies one camera preset (intrinsics + pose) to the live controls.
   // We also stop carousel mode so preset selection is deterministic.
@@ -185,9 +189,31 @@ async function main() {
   // 4) update HUD stats
   const frame = (now: number) => {
     const dtMs = Math.max(now - lastFrame, 0.0001);
+    const dtForControls = Math.min(dtMs, 34);
     lastFrame = now;
 
-    controls.update(dtMs);
+    controls.update(dtForControls);
+    let viewDelta = 0;
+    for (let i = 0; i < 16; i++) {
+      const current = controls.viewMatrix[i];
+      viewDelta += Math.abs(current - previousViewMatrix[i]);
+      previousViewMatrix[i] = current;
+    }
+    if (viewDelta > 1e-4) {
+      lastCameraMotionAt = now;
+    }
+
+    const cameraActive = now - lastCameraMotionAt < 140;
+    const canChangeScale = now - lastScaleChangeAt > 180;
+    if (cameraActive && renderScale > 0.7 && canChangeScale) {
+      renderScale = 0.7;
+      lastScaleChangeAt = now;
+      renderer.setResolutionScale(renderScale);
+    } else if (!cameraActive && renderScale < 1 && canChangeScale) {
+      renderScale = renderScale < 0.85 ? 0.85 : 1;
+      lastScaleChangeAt = now;
+      renderer.setResolutionScale(renderScale);
+    }
 
     // Animate the splat ↔ point-cloud crossfade at ~500 ms total duration.
     const pcTarget = renderOptions.pointCloud ? 1 : 0;
@@ -204,11 +230,14 @@ async function main() {
       }
     }
 
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const logicalWidth = Math.max(1, Math.round(dom.canvas.clientWidth * dpr));
+    const logicalHeight = Math.max(1, Math.round(dom.canvas.clientHeight * dpr));
     const projection = getProjectionMatrix(
       controls.camera.fx,
       controls.camera.fy,
-      dom.canvas.width || window.innerWidth,
-      dom.canvas.height || window.innerHeight,
+      logicalWidth,
+      logicalHeight,
     );
 
     const viewProj = multiply4(projection, controls.viewMatrix);
@@ -220,6 +249,7 @@ async function main() {
       viewLeft: getEyeViewMatrix(controls.viewMatrix, -eyeOffset),
       viewRight: getEyeViewMatrix(controls.viewMatrix, eyeOffset),
       focal: [controls.camera.fx, controls.camera.fy],
+      viewport: [logicalWidth, logicalHeight],
       transition: pcTransition,
       pointSize: renderOptions.pointSize,
       stereoMode: renderOptions.stereoMode,

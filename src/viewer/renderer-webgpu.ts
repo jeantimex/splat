@@ -15,6 +15,8 @@ export interface RenderState {
   viewLeft: Mat4;
   viewRight: Mat4;
   focal: [number, number];
+  // Logical display size in physical pixels (independent from internal render scale).
+  viewport: [number, number];
   // 0 = full splat, 1 = full point cloud; values in between crossfade both layers.
   transition: number;
   pointSize: number;
@@ -25,6 +27,7 @@ export interface WebGPURenderer {
   render: (state: RenderState) => void;
   setSplatData: (packed: Uint32Array, vertexCount: number) => void;
   setSortedIndices: (indices: Uint32Array) => void;
+  setResolutionScale: (scale: number) => void;
 }
 
 export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<WebGPURenderer> {
@@ -217,6 +220,9 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
   let offscreenPointTexture = createEyeTexture();
   let anaglyphCompositeBindGroup = createAnaglyphCompositeBindGroup();
   let crossfadeCompositeBindGroup = createCrossfadeCompositeBindGroup();
+  let resolutionScale = 1;
+  let configuredWidth = 0;
+  let configuredHeight = 0;
 
   const ensureSplatCapacity = (requiredU32: number) => {
     if (requiredU32 <= splatCapacity) return;
@@ -247,8 +253,13 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
   const resize = () => {
     // Canvas is device-pixel aware; CSS size is handled in styles.
     const dpr = Math.max(1, window.devicePixelRatio || 1);
-    canvas.width = Math.round(canvas.clientWidth * dpr);
-    canvas.height = Math.round(canvas.clientHeight * dpr);
+    const nextWidth = Math.max(1, Math.round(canvas.clientWidth * dpr * resolutionScale));
+    const nextHeight = Math.max(1, Math.round(canvas.clientHeight * dpr * resolutionScale));
+    if (nextWidth === configuredWidth && nextHeight === configuredHeight) return;
+    configuredWidth = nextWidth;
+    configuredHeight = nextHeight;
+    canvas.width = nextWidth;
+    canvas.height = nextHeight;
     context.configure({
       device,
       format,
@@ -277,8 +288,8 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
     const writeUniforms = (
       projection: Mat4,
       view: Mat4,
-      viewportWidth: number,
-      viewportHeight: number,
+      logicalViewportWidth: number,
+      logicalViewportHeight: number,
       mode: number,
       opacity: number,
       ub: GPUBuffer,
@@ -287,8 +298,8 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       uniformData.set(view, 16);
       uniformData[32] = state.focal[0];
       uniformData[33] = state.focal[1];
-      uniformData[34] = viewportWidth;
-      uniformData[35] = viewportHeight;
+      uniformData[34] = logicalViewportWidth;
+      uniformData[35] = logicalViewportHeight;
       uniformData[36] = mode;
       uniformData[37] = state.pointSize;
       uniformData[38] = opacity;
@@ -314,6 +325,8 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       viewportY: number;
       viewportWidth: number;
       viewportHeight: number;
+      logicalViewportWidth: number;
+      logicalViewportHeight: number;
       projection: Mat4;
       clear: boolean;
       mode: number;
@@ -344,8 +357,8 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       writeUniforms(
         params.projection,
         params.view,
-        params.viewportWidth,
-        params.viewportHeight,
+        params.logicalViewportWidth,
+        params.logicalViewportHeight,
         params.mode,
         params.opacity,
         params.ub,
@@ -364,6 +377,8 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       y: number,
       w: number,
       h: number,
+      logicalW: number,
+      logicalH: number,
       projection: Mat4,
       clearFirst: boolean,
       ubSplat: GPUBuffer,
@@ -382,6 +397,8 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
           viewportY: y,
           viewportWidth: w,
           viewportHeight: h,
+          logicalViewportWidth: logicalW,
+          logicalViewportHeight: logicalH,
           projection,
           clear: clearFirst,
           mode,
@@ -399,6 +416,8 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
           viewportY: y,
           viewportWidth: w,
           viewportHeight: h,
+          logicalViewportWidth: logicalW,
+          logicalViewportHeight: logicalH,
           projection,
           clear: clearFirst,
           mode: 0,
@@ -413,6 +432,8 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
           viewportY: y,
           viewportWidth: w,
           viewportHeight: h,
+          logicalViewportWidth: logicalW,
+          logicalViewportHeight: logicalH,
           projection,
           clear: false,
           mode: 1,
@@ -432,6 +453,8 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
           viewportY: 0,
           viewportWidth: w,
           viewportHeight: h,
+          logicalViewportWidth: logicalW,
+          logicalViewportHeight: logicalH,
           projection,
           clear: true,
           mode: 0,
@@ -446,6 +469,8 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
           viewportY: 0,
           viewportWidth: w,
           viewportHeight: h,
+          logicalViewportWidth: logicalW,
+          logicalViewportHeight: logicalH,
           projection,
           clear: true,
           mode: 1,
@@ -480,6 +505,8 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
         0,
         canvas.width,
         canvas.height,
+        state.viewport[0],
+        state.viewport[1],
         state.projection,
         true,
         uniformBuffer,
@@ -495,6 +522,8 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
         0,
         canvas.width,
         canvas.height,
+        state.viewport[0],
+        state.viewport[1],
         state.projection,
         true,
         uniformBufferB,
@@ -521,6 +550,8 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
     } else if (instanceCount > 0 && state.stereoMode === 'sbs') {
       const halfWidth = Math.max(1, Math.floor(canvas.width / 2));
       const projectionHalf = halfWidthProjection();
+      const logicalHalfWidth = Math.max(1, Math.floor(state.viewport[0] / 2));
+      const logicalRightWidth = Math.max(1, state.viewport[0] - logicalHalfWidth);
 
       drawEye(
         textureView,
@@ -529,6 +560,8 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
         0,
         halfWidth,
         canvas.height,
+        logicalHalfWidth,
+        state.viewport[1],
         projectionHalf,
         true,
         uniformBuffer,
@@ -544,6 +577,8 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
         0,
         canvas.width - halfWidth,
         canvas.height,
+        logicalRightWidth,
+        state.viewport[1],
         projectionHalf,
         false,
         uniformBufferB,
@@ -560,6 +595,8 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
         0,
         canvas.width,
         canvas.height,
+        state.viewport[0],
+        state.viewport[1],
         state.projection,
         true,
         uniformBuffer,
@@ -609,6 +646,14 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
     instanceCount = indices.length;
   };
 
+  const setResolutionScale = (scale: number) => {
+    const clamped = Math.max(0.3, Math.min(1, scale));
+    const quantized = Math.round(clamped * 20) / 20;
+    if (Math.abs(quantized - resolutionScale) < 1e-6) return;
+    resolutionScale = quantized;
+    resize();
+  };
+
   function createEyeTexture() {
     return device.createTexture({
       size: {
@@ -644,7 +689,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
     });
   }
 
-  return { render, setSplatData, setSortedIndices };
+  return { render, setSplatData, setSortedIndices, setResolutionScale };
 }
 
 function nextPow2(value: number): number {

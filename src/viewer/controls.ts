@@ -26,6 +26,7 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
   let dragMode: 'orbit' | 'pan' | 'roll' = 'orbit';
   let lastX = 0;
   let lastY = 0;
+  let lastDragMoveAt = 0;
 
   // Inertia velocities. Orbit/pan store the normalised screen-space deltas from
   // the most recent drag event; scroll accumulates wheel deltas. All three decay
@@ -59,11 +60,16 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
     else dragMode = 'orbit';
     lastX = event.clientX;
     lastY = event.clientY;
+    lastDragMoveAt = performance.now();
     // Kill residual inertia so the new gesture starts clean.
     clearInertia();
   });
 
   canvas.addEventListener('mouseup', () => {
+    // If pointer stopped before release, do not apply stale release inertia.
+    if (performance.now() - lastDragMoveAt > 80) {
+      clearInertia();
+    }
     isDragging = false;
   });
 
@@ -113,6 +119,7 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
 
     lastX = event.clientX;
     lastY = event.clientY;
+    lastDragMoveAt = performance.now();
   });
 
   window.addEventListener(

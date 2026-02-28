@@ -34,8 +34,10 @@ let vertexCount = 0;
 let viewProj: number[] = [];
 let lastProj: number[] = [];
 let lastVertexCount = -1;
-let depthIndex = new Uint32Array();
 let sortRunning = false;
+let sizeList = new Int32Array(0);
+const counts0 = new Uint32Array(256 * 256);
+const starts0 = new Uint32Array(256 * 256);
 
 const floatView = new Float32Array(1);
 const int32View = new Int32Array(floatView.buffer);
@@ -161,7 +163,9 @@ function runSort(proj: number[]) {
   // Project centers to a scalar depth key in view-projection space.
   let maxDepth = -Infinity;
   let minDepth = Infinity;
-  const sizeList = new Int32Array(vertexCount);
+  if (sizeList.length < vertexCount) {
+    sizeList = new Int32Array(vertexCount);
+  }
 
   for (let i = 0; i < vertexCount; i++) {
     const depth =
@@ -179,18 +183,18 @@ function runSort(proj: number[]) {
   // 16-bit counting sort:
   // fast enough for large splat sets and stable for alpha blending order.
   const depthInv = (256 * 256 - 1) / (maxDepth - minDepth || 1);
-  const counts0 = new Uint32Array(256 * 256);
+  counts0.fill(0);
   for (let i = 0; i < vertexCount; i++) {
     sizeList[i] = ((sizeList[i] - minDepth) * depthInv) | 0;
     counts0[sizeList[i]]++;
   }
 
-  const starts0 = new Uint32Array(256 * 256);
+  starts0[0] = 0;
   for (let i = 1; i < 256 * 256; i++) {
     starts0[i] = starts0[i - 1] + counts0[i - 1];
   }
 
-  depthIndex = new Uint32Array(vertexCount);
+  const depthIndex = new Uint32Array(vertexCount);
   for (let i = 0; i < vertexCount; i++) {
     depthIndex[starts0[sizeList[i]]++] = i;
   }

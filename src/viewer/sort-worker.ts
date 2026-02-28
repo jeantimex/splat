@@ -59,10 +59,10 @@ export function createSortWorker(callbacks: SortWorkerCallbacks): SortWorkerBrid
       worker.postMessage({ type: 'view', viewProj });
     },
     postSplatBuffer(buffer, vertexCount) {
-      worker.postMessage({ type: 'buffer', buffer, vertexCount });
+      worker.postMessage({ type: 'buffer', buffer, vertexCount }, [buffer]);
     },
     postPlyBuffer(buffer, save = false) {
-      worker.postMessage({ type: 'ply', buffer, save });
+      worker.postMessage({ type: 'ply', buffer, save }, [buffer]);
     },
     terminate() {
       worker.terminate();
