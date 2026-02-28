@@ -94,6 +94,22 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
 
     if (Math.abs(dx) < 1e-10 && Math.abs(dy) < 1e-10) return;
 
+    let sdx = dx;
+    let sdy = dy;
+
+    // Directional snapping for orbit mode:
+    // If movement is primarily along one axis (3:1 ratio or ~18 degrees),
+    // snap to that axis to prevent accidental drift.
+    if (dragMode === 'orbit') {
+      const adx = Math.abs(dx);
+      const ady = Math.abs(dy);
+      if (adx > ady * 3) {
+        sdy = 0;
+      } else if (ady > adx * 3) {
+        sdx = 0;
+      }
+    }
+
     const inv = invert4(viewMatrix);
     if (!inv) return;
 
@@ -108,14 +124,14 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
       const axisY = [viewMatrix[4], viewMatrix[5], viewMatrix[6]];
       const axisYLen = Math.hypot(axisY[0], axisY[1], axisY[2]);
       if (axisYLen > 1e-6) {
-        next = rotate4(next, 5 * dx, axisY[0] / axisYLen, axisY[1] / axisYLen, axisY[2] / axisYLen);
+        next = rotate4(next, 5 * sdx, axisY[0] / axisYLen, axisY[1] / axisYLen, axisY[2] / axisYLen);
       }
-      next = rotate4(next, -5 * dy, 1, 0, 0);
+      next = rotate4(next, -5 * sdy, 1, 0, 0);
       next = translate4(next, 0, 0, -d);
       const out = invert4(next);
       if (out) viewMatrix = out;
       // Snapshot the delta so update() can coast after release.
-      orbitVelocity = { dx, dy };
+      orbitVelocity = { dx: sdx, dy: sdy };
     } else if (dragMode === 'roll') {
       // Rotate around the camera's local Z axis (the forward axis).
       // Horizontal drag rolls the camera: right = clockwise, left = counter-clockwise.

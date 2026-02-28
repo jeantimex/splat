@@ -48,7 +48,7 @@ async function main() {
   const controls = createControls(dom.canvas);
   const renderOptions = {
     pointCloud: false,
-    pointSize: 0.5,
+    pointSize: 0.8,
     stereoMode: 'off' as 'off' | 'anaglyph' | 'sbs',
   };
   const gui = createGui(renderOptions);
