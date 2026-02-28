@@ -8,6 +8,7 @@ export interface SortWorkerBridge {
 export interface SortResult {
   depthIndex: Uint32Array;
   vertexCount: number;
+  sortMs: number;
 }
 
 export interface SplatPayload {
@@ -22,7 +23,7 @@ export interface SortWorkerCallbacks {
 }
 
 type WorkerMessage =
-  | { type: 'depth'; depthIndex: ArrayBuffer; vertexCount: number }
+  | { type: 'depth'; depthIndex: ArrayBuffer; vertexCount: number; sortMs: number }
   | { type: 'splat'; splatData: ArrayBuffer; vertexCount: number }
   | { type: 'buffer'; buffer: ArrayBuffer; save: boolean };
 
@@ -37,6 +38,7 @@ export function createSortWorker(callbacks: SortWorkerCallbacks): SortWorkerBrid
       callbacks.onSortResult?.({
         depthIndex: new Uint32Array(data.depthIndex),
         vertexCount: data.vertexCount,
+        sortMs: data.sortMs,
       });
       return;
     }

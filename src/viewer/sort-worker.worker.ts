@@ -23,6 +23,7 @@ interface WorkerToMainDepth {
   type: 'depth';
   depthIndex: ArrayBuffer;
   vertexCount: number;
+  sortMs: number;
 }
 
 // Internal CPU-side row format used by both .splat and converted .ply:
@@ -149,6 +150,7 @@ function int32ViewFromFloat(value: number): number {
 
 function runSort(proj: number[]) {
   if (!sourceBuffer || vertexCount <= 0 || proj.length < 16) return;
+  const sortStart = performance.now();
   const fBuffer = new Float32Array(sourceBuffer);
 
   if (lastVertexCount === vertexCount) {
@@ -204,6 +206,7 @@ function runSort(proj: number[]) {
     type: 'depth',
     depthIndex: depthIndex.buffer,
     vertexCount,
+    sortMs: performance.now() - sortStart,
   };
   ctx.postMessage(msg, [depthIndex.buffer]);
 }

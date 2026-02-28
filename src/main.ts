@@ -63,6 +63,11 @@ async function main() {
   let lastCameraMotionAt = performance.now();
   let lastScaleChangeAt = 0;
   const previousViewMatrix: Mat4 = [...controls.viewMatrix];
+  let hasPostedViewProj = false;
+  let lastViewProjPostAt = 0;
+  const lastPostedViewProj = new Float32Array(16);
+  let sortMsSample = 0;
+  let sortMsPending = false;
 
   // Applies one camera preset (intrinsics + pose) to the live controls.
   // We also stop carousel mode so preset selection is deterministic.
@@ -99,8 +104,10 @@ async function main() {
   // 2) per-frame depth sorting for correct alpha composition
   // Main thread only uploads worker outputs to GPU.
   const sortWorker = createSortWorker({
-    onSortResult: ({ depthIndex }) => {
+    onSortResult: ({ depthIndex, sortMs }) => {
       renderer.setSortedIndices(depthIndex);
+      sortMsSample = sortMs;
+      sortMsPending = true;
     },
     // Worker has rebuilt packed GPU payload.
     // Upload to renderer and hide startup UI once first payload arrives.
@@ -181,6 +188,9 @@ async function main() {
 
   let lastFrame = performance.now();
   let smoothedFps = 0;
+  let smoothedSortMs = 0;
+  let smoothedUploadMs = 0;
+  let smoothedRenderMs = 0;
 
   // Main render loop:
   // 1) update controls -> view matrix
@@ -241,7 +251,24 @@ async function main() {
     );
 
     const viewProj = multiply4(projection, controls.viewMatrix);
-    sortWorker.postViewProjection(viewProj);
+    let maxViewProjDelta = 0;
+    for (let i = 0; i < 16; i++) {
+      maxViewProjDelta = Math.max(maxViewProjDelta, Math.abs(viewProj[i] - lastPostedViewProj[i]));
+    }
+    const postIntervalMs = cameraActive ? 28 : 85;
+    const timeSincePost = now - lastViewProjPostAt;
+    const shouldPostView =
+      !hasPostedViewProj ||
+      (maxViewProjDelta > 0.0005 && timeSincePost >= postIntervalMs) ||
+      timeSincePost >= 220;
+    if (shouldPostView) {
+      sortWorker.postViewProjection(viewProj);
+      for (let i = 0; i < 16; i++) {
+        lastPostedViewProj[i] = viewProj[i];
+      }
+      hasPostedViewProj = true;
+      lastViewProjPostAt = now;
+    }
     const eyeOffset = renderOptions.stereoMode === 'anaglyph' ? 0.04 : 0.065;
     renderer.render({
       projection,
@@ -254,10 +281,19 @@ async function main() {
       pointSize: renderOptions.pointSize,
       stereoMode: renderOptions.stereoMode,
     });
+    const timings = renderer.consumeTimings();
 
     const fps = 1000 / dtMs;
     smoothedFps = smoothedFps * 0.9 + fps * 0.1;
-    dom.fps.textContent = `${Math.round(smoothedFps)} fps | ${loadedVertices.toLocaleString()} pts`;
+    smoothedUploadMs = smoothedUploadMs * 0.85 + timings.uploadMs * 0.15;
+    smoothedRenderMs = smoothedRenderMs * 0.85 + timings.renderMs * 0.15;
+    if (sortMsPending) {
+      smoothedSortMs = smoothedSortMs * 0.75 + sortMsSample * 0.25;
+      sortMsPending = false;
+    } else {
+      smoothedSortMs *= 0.99;
+    }
+    dom.fps.textContent = `${Math.round(smoothedFps)} fps | ${loadedVertices.toLocaleString()} pts | sort ${smoothedSortMs.toFixed(1)}ms | upload ${smoothedUploadMs.toFixed(2)}ms | render ${smoothedRenderMs.toFixed(2)}ms`;
     requestAnimationFrame(frame);
   };
 

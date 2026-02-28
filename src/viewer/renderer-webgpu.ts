@@ -28,6 +28,7 @@ export interface WebGPURenderer {
   setSplatData: (packed: Uint32Array, vertexCount: number) => void;
   setSortedIndices: (indices: Uint32Array) => void;
   setResolutionScale: (scale: number) => void;
+  consumeTimings: () => { uploadMs: number; renderMs: number };
 }
 
 export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<WebGPURenderer> {
@@ -223,6 +224,8 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
   let resolutionScale = 1;
   let configuredWidth = 0;
   let configuredHeight = 0;
+  let uploadMsAccum = 0;
+  let renderMsLast = 0;
 
   const ensureSplatCapacity = (requiredU32: number) => {
     if (requiredU32 <= splatCapacity) return;
@@ -282,6 +285,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
   const uniformData = new Float32Array(UNIFORM_FLOATS);
 
   const render = (state: RenderState) => {
+    const renderStart = performance.now();
     // writeUniforms queues data to a specific uniform buffer.
     // mode: 0 = splat, 1 = point cloud.
     // opacity: per-pass opacity multiplier for crossfade (1 = fully visible).
@@ -620,6 +624,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
     }
 
     device.queue.submit([encoder.finish()]);
+    renderMsLast = performance.now() - renderStart;
   };
 
   const setSplatData = (packed: Uint32Array, vertexCount: number) => {
@@ -627,10 +632,12 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       instanceCount = 0;
       return;
     }
+    const uploadStart = performance.now();
     ensureSplatCapacity(packed.length);
     // Upload a copy to prevent accidental external mutation during GPU readback.
     const upload = new Uint32Array(packed);
     device.queue.writeBuffer(splatBuffer, 0, upload);
+    uploadMsAccum += performance.now() - uploadStart;
     instanceCount = vertexCount;
   };
 
@@ -639,10 +646,12 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       instanceCount = 0;
       return;
     }
+    const uploadStart = performance.now();
     ensureIndexCapacity(indices.length);
     // Same defensive copy for indices.
     const upload = new Uint32Array(indices);
     device.queue.writeBuffer(sortedIndexBuffer, 0, upload);
+    uploadMsAccum += performance.now() - uploadStart;
     instanceCount = indices.length;
   };
 
@@ -652,6 +661,12 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
     if (Math.abs(quantized - resolutionScale) < 1e-6) return;
     resolutionScale = quantized;
     resize();
+  };
+
+  const consumeTimings = () => {
+    const timings = { uploadMs: uploadMsAccum, renderMs: renderMsLast };
+    uploadMsAccum = 0;
+    return timings;
   };
 
   function createEyeTexture() {
@@ -689,7 +704,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
     });
   }
 
-  return { render, setSplatData, setSortedIndices, setResolutionScale };
+  return { render, setSplatData, setSortedIndices, setResolutionScale, consumeTimings };
 }
 
 function nextPow2(value: number): number {
