@@ -49,6 +49,7 @@ async function main() {
   const renderOptions = {
     pointCloud: false,
     pointSize: 0.8,
+    culling: true,
     stereoMode: 'off' as 'off' | 'anaglyph' | 'sbs',
   };
   const gui = createGui(renderOptions);
@@ -262,7 +263,7 @@ async function main() {
       (maxViewProjDelta > 0.0005 && timeSincePost >= postIntervalMs) ||
       timeSincePost >= 220;
     if (shouldPostView) {
-      sortWorker.postViewProjection(viewProj);
+      sortWorker.postViewProjection(viewProj, renderOptions.culling);
       for (let i = 0; i < 16; i++) {
         lastPostedViewProj[i] = viewProj[i];
       }
@@ -437,10 +438,11 @@ function registerDragDrop(params: { onFile: (file: File) => Promise<void> }) {
   });
 }
 
-function createGui(renderOptions: { pointCloud: boolean; pointSize: number }) {
+function createGui(renderOptions: { pointCloud: boolean; pointSize: number; culling: boolean }) {
   const gui = new GUI({ title: 'Render' });
   gui.add(renderOptions, 'pointCloud').name('Point Cloud');
   gui.add(renderOptions, 'pointSize', 0.5, 6, 0.1).name('Point Size');
+  gui.add(renderOptions, 'culling').name('Spatially-Varying LOD');
   return gui;
 }
 

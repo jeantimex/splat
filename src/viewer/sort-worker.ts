@@ -1,5 +1,5 @@
 export interface SortWorkerBridge {
-  postViewProjection: (viewProj: number[]) => void;
+  postViewProjection: (viewProj: number[], culling?: boolean) => void;
   postSplatBuffer: (buffer: ArrayBuffer, vertexCount: number) => void;
   postPlyBuffer: (buffer: ArrayBuffer, save?: boolean) => void;
   terminate: () => void;
@@ -57,8 +57,8 @@ export function createSortWorker(callbacks: SortWorkerCallbacks): SortWorkerBrid
   };
 
   return {
-    postViewProjection(viewProj) {
-      worker.postMessage({ type: 'view', viewProj });
+    postViewProjection(viewProj, culling) {
+      worker.postMessage({ type: 'view', viewProj, culling });
     },
     postSplatBuffer(buffer, vertexCount) {
       worker.postMessage({ type: 'buffer', buffer, vertexCount }, [buffer]);

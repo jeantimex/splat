@@ -5,7 +5,7 @@ const ctx: DedicatedWorkerGlobalScope = self as unknown as DedicatedWorkerGlobal
 type MainToWorkerMessage =
   | { type: 'ply'; buffer: ArrayBuffer; save?: boolean }
   | { type: 'buffer'; buffer: ArrayBuffer; vertexCount: number }
-  | { type: 'view'; viewProj: number[] };
+  | { type: 'view'; viewProj: number[]; culling?: boolean };
 
 interface WorkerToMainBuffer {
   type: 'buffer';
@@ -35,8 +35,10 @@ let vertexCount = 0;
 let viewProj: number[] = [];
 let lastProj: number[] = [];
 let lastVertexCount = -1;
+let lastCulling = true;
 let sortRunning = false;
 let sizeList = new Int32Array(0);
+let visibleIndices = new Uint32Array(0);
 const counts0 = new Uint32Array(256 * 256);
 const starts0 = new Uint32Array(256 * 256);
 
@@ -148,45 +150,90 @@ function int32ViewFromFloat(value: number): number {
   return int32View[0] >>> 0;
 }
 
-function runSort(proj: number[]) {
+function runSort(proj: number[], culling = true) {
   if (!sourceBuffer || vertexCount <= 0 || proj.length < 16) return;
   const sortStart = performance.now();
   const fBuffer = new Float32Array(sourceBuffer);
 
-  if (lastVertexCount === vertexCount) {
-    // Skip sort when view direction barely changed.
+  if (lastVertexCount === vertexCount && lastCulling === culling) {
     const dot = lastProj[2] * proj[2] + lastProj[6] * proj[6] + lastProj[10] * proj[10];
-    if (Math.abs(dot - 1) < 0.01) return;
+    if (Math.abs(dot - 1) < 0.01) {
+      const distSq =
+        (lastProj[12] - proj[12]) ** 2 +
+        (lastProj[13] - proj[13]) ** 2 +
+        (lastProj[14] - proj[14]) ** 2;
+      if (distSq < 0.0001) return;
+    }
   } else {
     postSplatPayload();
     lastVertexCount = vertexCount;
   }
 
-  // Project centers to a scalar depth key in view-projection space.
+  // Frustum planes from column-major View-Projection matrix.
+  const planes = [
+    [proj[3] + proj[0], proj[7] + proj[4], proj[11] + proj[8], proj[15] + proj[12]], // Left
+    [proj[3] - proj[0], proj[7] - proj[4], proj[11] - proj[8], proj[15] - proj[12]], // Right
+    [proj[3] + proj[1], proj[7] + proj[5], proj[11] + proj[9], proj[15] + proj[13]], // Bottom
+    [proj[3] - proj[1], proj[7] - proj[5], proj[11] - proj[9], proj[15] - proj[13]], // Top
+    [proj[2], proj[6], proj[10], proj[14]], // Near
+    [proj[3] - proj[2], proj[7] - proj[6], proj[11] - proj[10], proj[15] - proj[14]], // Far
+  ];
+
   let maxDepth = -Infinity;
   let minDepth = Infinity;
   if (sizeList.length < vertexCount) {
     sizeList = new Int32Array(vertexCount);
+    visibleIndices = new Uint32Array(vertexCount);
   }
 
-  for (let i = 0; i < vertexCount; i++) {
-    const depth =
-      ((proj[2] * fBuffer[8 * i + 0] +
-        proj[6] * fBuffer[8 * i + 1] +
-        proj[10] * fBuffer[8 * i + 2]) *
-        4096) |
-      0;
+  const lodStepOutside = 8;
+  const frustumPadding = -0.5; // Negative value expands the 'inside' area.
+  let renderCount = 0;
 
-    sizeList[i] = depth;
-    if (depth > maxDepth) maxDepth = depth;
-    if (depth < minDepth) minDepth = depth;
+  for (let i = 0; i < vertexCount; i++) {
+    const x = fBuffer[8 * i + 0];
+    const y = fBuffer[8 * i + 1];
+    const z = fBuffer[8 * i + 2];
+
+    let inside = true;
+    if (culling) {
+      // Check if point is inside frustum (with padding).
+      for (let p = 0; p < 6; p++) {
+        const plane = planes[p];
+        if (plane[0] * x + plane[1] * y + plane[2] * z + plane[3] < frustumPadding) {
+          inside = false;
+          break;
+        }
+      }
+    }
+
+    // High detail for inside, low detail (strided) for outside.
+    if (!culling || inside || i % lodStepOutside === 0) {
+      visibleIndices[renderCount] = i;
+
+      const depth = ((proj[2] * x + proj[6] * y + proj[10] * z) * 4096) | 0;
+      sizeList[renderCount] = depth;
+      if (depth > maxDepth) maxDepth = depth;
+      if (depth < minDepth) minDepth = depth;
+      renderCount++;
+    }
+  }
+
+  if (renderCount === 0) {
+    const msg: WorkerToMainDepth = {
+      type: 'depth',
+      depthIndex: new Uint32Array(0).buffer,
+      vertexCount: 0,
+      sortMs: performance.now() - sortStart,
+    };
+    ctx.postMessage(msg, [msg.depthIndex]);
+    return;
   }
 
   // 16-bit counting sort:
-  // fast enough for large splat sets and stable for alpha blending order.
   const depthInv = (256 * 256 - 1) / (maxDepth - minDepth || 1);
   counts0.fill(0);
-  for (let i = 0; i < vertexCount; i++) {
+  for (let i = 0; i < renderCount; i++) {
     sizeList[i] = ((sizeList[i] - minDepth) * depthInv) | 0;
     counts0[sizeList[i]]++;
   }
@@ -196,16 +243,18 @@ function runSort(proj: number[]) {
     starts0[i] = starts0[i - 1] + counts0[i - 1];
   }
 
-  const depthIndex = new Uint32Array(vertexCount);
-  for (let i = 0; i < vertexCount; i++) {
-    depthIndex[starts0[sizeList[i]]++] = i;
+  const depthIndex = new Uint32Array(renderCount);
+  for (let i = 0; i < renderCount; i++) {
+    const originalIdx = visibleIndices[i];
+    depthIndex[starts0[sizeList[i]]++] = originalIdx;
   }
 
   lastProj = proj.slice();
+  lastCulling = culling;
   const msg: WorkerToMainDepth = {
     type: 'depth',
     depthIndex: depthIndex.buffer,
-    vertexCount,
+    vertexCount: renderCount,
     sortMs: performance.now() - sortStart,
   };
   ctx.postMessage(msg, [depthIndex.buffer]);
@@ -516,7 +565,8 @@ function throttledSort() {
   if (sortRunning) return;
   sortRunning = true;
   const lastView = viewProj;
-  runSort(lastView);
+  const lastCul = lastCulling;
+  runSort(lastView, lastCul);
   setTimeout(() => {
     sortRunning = false;
     if (lastView !== viewProj) {
@@ -530,7 +580,7 @@ ctx.onmessage = (event: MessageEvent<MainToWorkerMessage>) => {
   if (msg.type === 'ply') {
     // Reset state before conversion so UI can reflect transient empty payload.
     vertexCount = 0;
-    runSort(viewProj);
+    runSort(viewProj, lastCulling);
     sourceBuffer = processPlyBuffer(msg.buffer);
     vertexCount = Math.floor(sourceBuffer.byteLength / ROW_BYTES);
     const out: WorkerToMainBuffer = {
@@ -552,6 +602,9 @@ ctx.onmessage = (event: MessageEvent<MainToWorkerMessage>) => {
   if (msg.type === 'view') {
     // Sorting is view-dependent; every camera update can change draw order.
     viewProj = msg.viewProj;
+    if (msg.culling !== undefined) {
+      lastCulling = msg.culling;
+    }
     throttledSort();
   }
 };
