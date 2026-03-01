@@ -51,6 +51,7 @@ async function main() {
     pointSize: 0.8,
     culling: true,
     stereoMode: 'off' as 'off' | 'anaglyph' | 'sbs',
+    fov: 35,
     brightness: 0,
     contrast: 1,
     gamma: 1,
@@ -255,9 +256,13 @@ async function main() {
     const dpr = Math.max(1, window.devicePixelRatio || 1);
     const logicalWidth = Math.max(1, Math.round(dom.canvas.clientWidth * dpr));
     const logicalHeight = Math.max(1, Math.round(dom.canvas.clientHeight * dpr));
+    const fovRad = (renderOptions.fov * Math.PI) / 180;
+    const fovFy = logicalHeight / (2 * Math.tan(fovRad / 2));
+    const fxFyRatio = controls.camera.fx / Math.max(controls.camera.fy, 1e-6);
+    const fovFx = fovFy * fxFyRatio;
     const projection = getProjectionMatrix(
-      controls.camera.fx,
-      controls.camera.fy,
+      fovFx,
+      fovFy,
       logicalWidth,
       logicalHeight,
     );
@@ -287,7 +292,7 @@ async function main() {
       view: controls.viewMatrix,
       viewLeft: getEyeViewMatrix(controls.viewMatrix, -eyeOffset),
       viewRight: getEyeViewMatrix(controls.viewMatrix, eyeOffset),
-      focal: [controls.camera.fx, controls.camera.fy],
+      focal: [fovFx, fovFy],
       viewport: [logicalWidth, logicalHeight],
       transition: pcTransition,
       pointSize: renderOptions.pointSize,
@@ -464,6 +469,7 @@ function createGui(renderOptions: {
   pointCloud: boolean;
   pointSize: number;
   culling: boolean;
+  fov: number;
   brightness: number;
   contrast: number;
   gamma: number;
@@ -480,6 +486,9 @@ function createGui(renderOptions: {
   gui.add(renderOptions, 'pointCloud').name('Point Cloud');
   gui.add(renderOptions, 'pointSize', 0.5, 6, 0.1).name('Point Size');
   gui.add(renderOptions, 'culling').name('Spatially-Varying LOD');
+  const cameraGui = gui.addFolder('Camera');
+  cameraGui.add(renderOptions, 'fov', 20, 120, 0.1).name('FOV');
+  cameraGui.open();
 
   const colorGui = gui.addFolder('Adjust Colors');
   colorGui.add(renderOptions, 'brightness', -1, 1, 0.001).name('Brightness');
@@ -504,6 +513,7 @@ function getEyeViewMatrix(view: Mat4, eyeOffset: number): Mat4 {
   const out = invert4(shifted);
   return out ?? view;
 }
+
 
 function setupStereoButtons(
   viewerDom: ViewerDom,
