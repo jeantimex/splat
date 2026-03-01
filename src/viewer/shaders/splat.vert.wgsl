@@ -6,13 +6,13 @@ struct Uniforms {
   focal: vec2<f32>,
   // Canvas size in physical pixels.
   viewport: vec2<f32>,
-  // x: render mode (0=splat, 1=point), y: point size, z: opacity multiplier, w: unused.
+  // x: render mode (0=splat, 1=point), y: point size, z: opacity multiplier, w: splat scale.
   render_params: vec4<f32>,
   // x: brightness, y: contrast, z: gamma, w: alpha multiplier.
   color_basic: vec4<f32>,
   // x: black level, y: white level, z: intensity, w: saturation.
   color_levels: vec4<f32>,
-  // x: vibrance, y: temperature, z: tint, w: unused.
+  // x: vibrance, y: temperature, z: tint, w: antialias.
   color_mix: vec4<f32>,
 }
 
@@ -110,7 +110,12 @@ fn vs_main(input: VSIn) -> VSOut {
 
     let view3 = mat3x3<f32>(uniforms.view[0].xyz, uniforms.view[1].xyz, uniforms.view[2].xyz);
     let t = transpose(view3) * j;
-    let cov2d = transpose(t) * vrk * t;
+    var cov2d = transpose(t) * vrk * t;
+
+    // Apply low-pass filter to prevent aliasing when splats are very small.
+    let antialias = uniforms.color_mix.w;
+    cov2d[0][0] += antialias;
+    cov2d[1][1] += antialias;
 
     // Solve ellipse principal axes from 2x2 covariance.
     let mid = (cov2d[0][0] + cov2d[1][1]) * 0.5;

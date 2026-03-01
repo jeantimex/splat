@@ -21,6 +21,7 @@ export interface RenderState {
   transition: number;
   pointSize: number;
   splatScale: number;
+  antialias: number;
   stereoMode: 'off' | 'anaglyph' | 'sbs';
   brightness: number;
   contrast: number;
@@ -335,7 +336,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       uniformData[48] = state.vibrance;
       uniformData[49] = state.temperature;
       uniformData[50] = state.tint;
-      uniformData[51] = 0;
+      uniformData[51] = state.antialias;
       device.queue.writeBuffer(ub, 0, uniformData);
     };
     const halfWidthProjection = (): Mat4 => {

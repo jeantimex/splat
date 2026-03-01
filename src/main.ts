@@ -53,6 +53,7 @@ async function main() {
     stereoMode: 'off' as 'off' | 'anaglyph' | 'sbs',
     fov: 35,
     splatScale: 1,
+    antialias: 0.3,
     brightness: 0,
     contrast: 1,
     gamma: 1,
@@ -298,6 +299,7 @@ async function main() {
       transition: pcTransition,
       pointSize: renderOptions.pointSize,
       splatScale: renderOptions.splatScale,
+      antialias: renderOptions.antialias,
       stereoMode: renderOptions.stereoMode,
       brightness: renderOptions.brightness,
       contrast: renderOptions.contrast,
@@ -473,6 +475,7 @@ function createGui(renderOptions: {
   culling: boolean;
   fov: number;
   splatScale: number;
+  antialias: number;
   brightness: number;
   contrast: number;
   gamma: number;
@@ -492,6 +495,7 @@ function createGui(renderOptions: {
 
   const splatGui = gui.addFolder('Splat Settings');
   splatGui.add(renderOptions, 'splatScale', 0, 1, 0.001).name('Splatscale');
+  splatGui.add(renderOptions, 'antialias', 0, 4, 0.001).name('Antialias');
   splatGui.open();
 
   const cameraGui = gui.addFolder('Camera');
