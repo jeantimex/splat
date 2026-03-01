@@ -24,7 +24,6 @@ interface ViewerDom {
   message: HTMLDivElement;
   fps: HTMLSpanElement;
   progress: HTMLDivElement;
-  camId: HTMLSpanElement;
   dropzone: HTMLDivElement;
   anaglyphButton: HTMLButtonElement;
   stereoButton: HTMLButtonElement;
@@ -94,7 +93,6 @@ async function main() {
     controls.camera.fy = camera.fy;
     controls.setViewMatrix(getViewMatrix(camera));
     controls.setCarousel(false);
-    dom.camId.textContent = `cam ${currentCameraIndex}`;
   };
 
   // Restores a serialized 4x4 view matrix from URL hash.
@@ -104,14 +102,12 @@ async function main() {
     if (!matrix) return false;
     controls.setViewMatrix(matrix);
     controls.setCarousel(false);
-    dom.camId.textContent = '';
     return true;
   };
 
   // Persists the current camera matrix into URL hash for reproducible viewpoints.
   const saveViewToHash = () => {
     location.hash = `#${encodeURIComponent(encodeViewMatrix(controls.viewMatrix))}`;
-    dom.camId.textContent = '';
   };
 
   // Worker owns CPU-heavy preprocessing:
@@ -156,9 +152,6 @@ async function main() {
     getCurrentCameraIndex: () => currentCameraIndex,
     saveViewToHash,
     setCarousel: (enabled) => controls.setCarousel(enabled),
-    clearCameraLabel: () => {
-      dom.camId.textContent = '';
-    },
   });
 
   // Keep hash-driven camera restoration reactive.
@@ -348,7 +341,6 @@ function getViewerDom(): ViewerDom {
   const message = app.querySelector<HTMLDivElement>('#message');
   const fps = app.querySelector<HTMLSpanElement>('#fps');
   const progress = app.querySelector<HTMLDivElement>('#progress');
-  const camId = app.querySelector<HTMLSpanElement>('#camid');
   const dropzone = app.querySelector<HTMLDivElement>('#dropzone');
   const anaglyphButton = app.querySelector<HTMLButtonElement>('#btn-anaglyph');
   const stereoButton = app.querySelector<HTMLButtonElement>('#btn-stereo');
@@ -358,7 +350,6 @@ function getViewerDom(): ViewerDom {
     !message ||
     !fps ||
     !progress ||
-    !camId ||
     !dropzone ||
     !anaglyphButton ||
     !stereoButton
@@ -366,7 +357,7 @@ function getViewerDom(): ViewerDom {
     throw new Error('Missing viewer DOM nodes');
   }
 
-  return { canvas, message, fps, progress, camId, dropzone, anaglyphButton, stereoButton };
+  return { canvas, message, fps, progress, dropzone, anaglyphButton, stereoButton };
 }
 
 function normalizeIndex(index: number, size: number): number {
@@ -419,9 +410,8 @@ function registerKeyboardShortcuts(params: {
   getCurrentCameraIndex: () => number;
   saveViewToHash: () => void;
   setCarousel: (enabled: boolean) => void;
-  clearCameraLabel: () => void;
 }) {
-  const { applyCamera, getCurrentCameraIndex, saveViewToHash, setCarousel, clearCameraLabel } =
+  const { applyCamera, getCurrentCameraIndex, saveViewToHash, setCarousel } =
     params;
 
   // We use keydown only; camera navigation actions are stateless per keypress.
@@ -440,7 +430,6 @@ function registerKeyboardShortcuts(params: {
     }
     if (event.code === 'KeyP') {
       setCarousel(true);
-      clearCameraLabel();
       return;
     }
     if (event.code === 'KeyV') {
@@ -489,18 +478,18 @@ function createGui(renderOptions: {
   alpha: number;
 }) {
   const gui = new GUI({ title: 'Render' });
-  gui.add(renderOptions, 'pointCloud').name('Point Cloud');
-  gui.add(renderOptions, 'pointSize', 0.5, 6, 0.1).name('Point Size');
-  gui.add(renderOptions, 'culling').name('Spatially-Varying LOD');
 
   const splatGui = gui.addFolder('Splat Settings');
+  splatGui.add(renderOptions, 'pointCloud').name('Point Cloud');
+  splatGui.add(renderOptions, 'pointSize', 0.5, 6, 0.1).name('Point Size');
+  splatGui.add(renderOptions, 'culling').name('Spatially-Varying LOD');
   splatGui.add(renderOptions, 'splatScale', 0, 1, 0.001).name('Splatscale');
   splatGui.add(renderOptions, 'antialias', 0, 4, 0.001).name('Antialias');
-  splatGui.open();
+  splatGui.close();
 
   const cameraGui = gui.addFolder('Camera');
   cameraGui.add(renderOptions, 'fov', 20, 120, 0.1).name('FOV');
-  cameraGui.open();
+  cameraGui.close();
 
   const colorGui = gui.addFolder('Adjust Colors');
   colorGui.add(renderOptions, 'brightness', -1, 1, 0.001).name('Brightness');
@@ -514,7 +503,7 @@ function createGui(renderOptions: {
   colorGui.add(renderOptions, 'temperature', -1, 1, 0.001).name('Temperature');
   colorGui.add(renderOptions, 'tint', -1, 1, 0.001).name('Tint');
   colorGui.add(renderOptions, 'alpha', 0, 1, 0.001).name('Alpha');
-  colorGui.open();
+  colorGui.close();
   return gui;
 }
 
