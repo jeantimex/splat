@@ -6,7 +6,7 @@ export interface CameraIntrinsics {
 }
 
 export interface CameraPose extends CameraIntrinsics {
-  id: number;
+  id: number | string;
   img_name: string;
   width: number;
   height: number;

@@ -65,23 +65,8 @@ async function main() {
     tint: 0,
     alpha: 1,
   };
-  const gui = createGui(renderOptions);
-  setupStereoButtons(dom, renderOptions);
-
   let cameras: CameraPose[] = [...DEFAULT_CAMERAS];
   let currentCameraIndex = 0;
-  let loadedVertices = 0;
-  // Animated crossfade value: 0 = full splat, 1 = full point cloud.
-  let pcTransition = 0;
-  let renderScale = 1;
-  let lastCameraMotionAt = performance.now();
-  let lastScaleChangeAt = 0;
-  const previousViewMatrix: Mat4 = [...controls.viewMatrix];
-  let hasPostedViewProj = false;
-  let lastViewProjPostAt = 0;
-  const lastPostedViewProj = new Float32Array(16);
-  let sortMsSample = 0;
-  let sortMsPending = false;
 
   // Applies one camera preset (intrinsics + pose) to the live controls.
   // We also stop carousel mode so preset selection is deterministic.
@@ -94,6 +79,48 @@ async function main() {
     controls.setViewMatrix(getViewMatrix(camera));
     controls.setCarousel(false);
   };
+
+  const gui = createGui(renderOptions, {
+    onCamerasLoaded: (newCameras) => {
+      cameras = newCameras;
+    },
+    onApplyCamera: (index) => {
+      applyCamera(index);
+    },
+    onLogPose: () => {
+      const inv = invert4(controls.viewMatrix);
+      if (!inv) return;
+      const pose = {
+        id: crypto.randomUUID(),
+        img_name: `custom_${cameras.length}`,
+        width: dom.canvas.width,
+        height: dom.canvas.height,
+        position: [inv[12], inv[13], inv[14]],
+        rotation: [
+          [inv[0], inv[4], inv[8]],
+          [inv[1], inv[5], inv[9]],
+          [inv[2], inv[6], inv[10]],
+        ],
+        fy: controls.camera.fy,
+        fx: controls.camera.fx,
+      };
+      console.log('Current Camera Pose:', JSON.stringify(pose, null, 2));
+    }
+  });
+  setupStereoButtons(dom, renderOptions);
+
+  let loadedVertices = 0;
+  // Animated crossfade value: 0 = full splat, 1 = full point cloud.
+  let pcTransition = 0;
+  let renderScale = 1;
+  let lastCameraMotionAt = performance.now();
+  let lastScaleChangeAt = 0;
+  const previousViewMatrix: Mat4 = [...controls.viewMatrix];
+  let hasPostedViewProj = false;
+  let lastViewProjPostAt = 0;
+  const lastPostedViewProj = new Float32Array(16);
+  let sortMsSample = 0;
+  let sortMsPending = false;
 
   // Restores a serialized 4x4 view matrix from URL hash.
   // Returns false when hash is missing/invalid so caller can fallback to defaults.
@@ -458,25 +485,32 @@ function registerDragDrop(params: { onFile: (file: File) => Promise<void> }) {
   });
 }
 
-function createGui(renderOptions: {
-  pointCloud: boolean;
-  pointSize: number;
-  culling: boolean;
-  fov: number;
-  splatScale: number;
-  antialias: number;
-  brightness: number;
-  contrast: number;
-  gamma: number;
-  blackLevel: number;
-  whiteLevel: number;
-  intensity: number;
-  saturate: number;
-  vibrance: number;
-  temperature: number;
-  tint: number;
-  alpha: number;
-}) {
+function createGui(
+  renderOptions: {
+    pointCloud: boolean;
+    pointSize: number;
+    culling: boolean;
+    fov: number;
+    splatScale: number;
+    antialias: number;
+    brightness: number;
+    contrast: number;
+    gamma: number;
+    blackLevel: number;
+    whiteLevel: number;
+    intensity: number;
+    saturate: number;
+    vibrance: number;
+    temperature: number;
+    tint: number;
+    alpha: number;
+  },
+  callbacks: {
+    onCamerasLoaded: (cameras: CameraPose[]) => void;
+    onApplyCamera: (index: number) => void;
+    onLogPose: () => void;
+  },
+) {
   const gui = new GUI({ title: 'Render' });
 
   const splatGui = gui.addFolder('Splat Settings');
@@ -489,6 +523,65 @@ function createGui(renderOptions: {
 
   const cameraGui = gui.addFolder('Camera');
   cameraGui.add(renderOptions, 'fov', 20, 120, 0.1).name('FOV');
+
+  const cameraState = {
+    selectedCamera: '',
+  };
+  let cameraDropdown: any = null;
+
+  const updateCameraDropdown = (cameras: CameraPose[]) => {
+    if (cameraDropdown) {
+      cameraDropdown.destroy();
+    }
+    const cameraNames = cameras.map((c, i) => `${i + 1}: ${c.img_name}`);
+    cameraState.selectedCamera = cameraNames[0] || '';
+    cameraDropdown = cameraGui
+      .add(cameraState, 'selectedCamera', cameraNames)
+      .name('Positions')
+      .onChange((displayName: string) => {
+        const indexStr = displayName.split(':')[0];
+        const index = Number.parseInt(indexStr, 10) - 1;
+        if (index >= 0 && index < cameras.length) {
+          callbacks.onApplyCamera(index);
+        }
+      });
+  };
+
+  cameraGui.add({
+    loadCameras: () => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.json';
+      input.onchange = async () => {
+        const file = input.files?.[0];
+        if (!file) return;
+        try {
+          const parsed = JSON.parse(await file.text()) as CameraPose[];
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            callbacks.onCamerasLoaded(parsed);
+            updateCameraDropdown(parsed);
+            callbacks.onApplyCamera(0);
+            dom.message.textContent = `Loaded ${file.name}`;
+            setTimeout(() => {
+              if (dom.message.textContent === `Loaded ${file.name}`) {
+                dom.message.textContent = '';
+              }
+            }, 3000);
+          }
+        } catch (err) {
+          dom.message.textContent = `Error loading cameras: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      };
+      input.click();
+    }
+  }, 'loadCameras').name('Load Cameras');
+
+  cameraGui.add({
+    logPose: () => {
+      callbacks.onLogPose();
+    }
+  }, 'logPose').name('Log Camera Pose');
+
   cameraGui.close();
 
   const colorGui = gui.addFolder('Adjust Colors');
