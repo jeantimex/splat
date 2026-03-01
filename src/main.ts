@@ -52,6 +52,7 @@ async function main() {
     culling: true,
     stereoMode: 'off' as 'off' | 'anaglyph' | 'sbs',
     fov: 35,
+    splatScale: 1,
     brightness: 0,
     contrast: 1,
     gamma: 1,
@@ -296,6 +297,7 @@ async function main() {
       viewport: [logicalWidth, logicalHeight],
       transition: pcTransition,
       pointSize: renderOptions.pointSize,
+      splatScale: renderOptions.splatScale,
       stereoMode: renderOptions.stereoMode,
       brightness: renderOptions.brightness,
       contrast: renderOptions.contrast,
@@ -470,6 +472,7 @@ function createGui(renderOptions: {
   pointSize: number;
   culling: boolean;
   fov: number;
+  splatScale: number;
   brightness: number;
   contrast: number;
   gamma: number;
@@ -486,6 +489,11 @@ function createGui(renderOptions: {
   gui.add(renderOptions, 'pointCloud').name('Point Cloud');
   gui.add(renderOptions, 'pointSize', 0.5, 6, 0.1).name('Point Size');
   gui.add(renderOptions, 'culling').name('Spatially-Varying LOD');
+
+  const splatGui = gui.addFolder('Splat Settings');
+  splatGui.add(renderOptions, 'splatScale', 0, 1, 0.001).name('Splatscale');
+  splatGui.open();
+
   const cameraGui = gui.addFolder('Camera');
   cameraGui.add(renderOptions, 'fov', 20, 120, 0.1).name('FOV');
   cameraGui.open();

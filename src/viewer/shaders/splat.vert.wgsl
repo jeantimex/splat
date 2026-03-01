@@ -129,8 +129,9 @@ fn vs_main(input: VSIn) -> VSOut {
     }
 
     let diag = normalize(vec2<f32>(cov2d[0][1], lambda1 - cov2d[0][0]));
-    major_axis = min(sqrt(2.0 * lambda1), 1024.0) * diag;
-    minor_axis = min(sqrt(2.0 * lambda2), 1024.0) * vec2<f32>(diag.y, -diag.x);
+    let splat_scale = uniforms.render_params.w;
+    major_axis = min(sqrt(2.0 * lambda1), 1024.0) * diag * splat_scale;
+    minor_axis = min(sqrt(2.0 * lambda2), 1024.0) * vec2<f32>(diag.y, -diag.x) * splat_scale;
   }
 
   var out: VSOut;

@@ -20,6 +20,7 @@ export interface RenderState {
   // 0 = full splat, 1 = full point cloud; values in between crossfade both layers.
   transition: number;
   pointSize: number;
+  splatScale: number;
   stereoMode: 'off' | 'anaglyph' | 'sbs';
   brightness: number;
   contrast: number;
@@ -322,7 +323,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       uniformData[36] = mode;
       uniformData[37] = state.pointSize;
       uniformData[38] = opacity;
-      uniformData[39] = 0;
+      uniformData[39] = state.splatScale;
       uniformData[40] = state.brightness;
       uniformData[41] = state.contrast;
       uniformData[42] = state.gamma;
