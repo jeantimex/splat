@@ -11,6 +11,7 @@ import {
 interface ControlsState {
   camera: CameraIntrinsics;
   viewMatrix: Mat4;
+  isInteracting: boolean;
   setViewMatrix: (matrix: Mat4) => void;
   setCarousel: (enabled: boolean) => void;
   update: (dtMs: number) => void;
@@ -295,6 +296,9 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
     camera: { ...DEFAULT_INTRINSICS },
     get viewMatrix() {
       return viewMatrix;
+    },
+    get isInteracting() {
+      return isDragging || activeKeys.size > 0;
     },
     setViewMatrix(matrix) {
       viewMatrix = [...matrix];

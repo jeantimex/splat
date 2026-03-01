@@ -64,9 +64,14 @@ async function main() {
     temperature: 0,
     tint: 0,
     alpha: 1,
+    animateCamera: true,
+    animationDuration: 1350,
   };
   let cameras: CameraPose[] = [...DEFAULT_CAMERAS];
   let currentCameraIndex = 0;
+
+  let targetViewMatrix: Mat4 | null = null;
+  let animationStartTime = 0;
 
   // Applies one camera preset (intrinsics + pose) to the live controls.
   // We also stop carousel mode so preset selection is deterministic.
@@ -74,15 +79,48 @@ async function main() {
     if (!cameras.length) return;
     currentCameraIndex = normalizeIndex(index, cameras.length);
     const camera = cameras[currentCameraIndex];
+
+    const nextView = getViewMatrix(camera);
+    if (renderOptions.animateCamera) {
+      targetViewMatrix = [...nextView];
+      animationStartTime = performance.now();
+    } else {
+      controls.setViewMatrix(nextView);
+      targetViewMatrix = null;
+    }
+
     controls.camera.fx = camera.fx;
     controls.camera.fy = camera.fy;
-    controls.setViewMatrix(getViewMatrix(camera));
     controls.setCarousel(false);
   };
 
+  const cameraState = {
+    selectedCamera: '',
+  };
+  let cameraDropdown: any = null;
+
+  const updateCameraDropdown = (cameras: CameraPose[], cameraGui: any, callbacks: any) => {
+    if (cameraDropdown) {
+      cameraDropdown.destroy();
+    }
+    const cameraNames = cameras.map((c, i) => `${i + 1}: ${c.img_name}`);
+    cameraState.selectedCamera = cameraNames[0] || '';
+    cameraDropdown = cameraGui
+      .add(cameraState, 'selectedCamera', cameraNames)
+      .name('Positions')
+      .onChange((displayName: string) => {
+        const indexStr = displayName.split(':')[0];
+        const index = Number.parseInt(indexStr, 10) - 1;
+        if (index >= 0 && index < cameras.length) {
+          callbacks.onApplyCamera(index);
+        }
+      });
+  };
+
   const gui = createGui(renderOptions, {
-    onCamerasLoaded: (newCameras) => {
+    onCamerasLoaded: (newCameras, cameraGui, callbacks) => {
       cameras = newCameras;
+      updateCameraDropdown(newCameras, cameraGui, callbacks);
     },
     onApplyCamera: (index) => {
       applyCamera(index);
@@ -108,6 +146,8 @@ async function main() {
     }
   });
   setupStereoButtons(dom, renderOptions);
+
+  const cameraGui = gui.folders.find((f) => f._title === 'Camera');
 
   let loadedVertices = 0;
   // Animated crossfade value: 0 = full splat, 1 = full point cloud.
@@ -197,8 +237,13 @@ async function main() {
         const parsed = JSON.parse(await file.text()) as CameraPose[];
         if (Array.isArray(parsed) && parsed.length > 0) {
           cameras = parsed;
+          if (cameraGui) {
+            updateCameraDropdown(parsed, cameraGui, {
+              onApplyCamera: (index: number) => applyCamera(index),
+            });
+          }
           applyCamera(0);
-          dom.message.textContent = 'Loaded cameras.json';
+          dom.message.textContent = '';
         }
         return;
       }
@@ -238,6 +283,27 @@ async function main() {
     lastFrame = now;
 
     controls.update(dtForControls);
+
+    if (controls.isInteracting) {
+      targetViewMatrix = null;
+    }
+
+    if (targetViewMatrix) {
+      const elapsed = now - animationStartTime;
+      const duration = Math.max(renderOptions.animationDuration, 1);
+      const t = Math.min(elapsed / duration, 1);
+      const ease = t * t * (3 - 2 * t);
+      const current = controls.viewMatrix;
+      const next: Mat4 = [];
+      for (let i = 0; i < 16; i++) {
+        next[i] = current[i] + (targetViewMatrix[i] - current[i]) * ease;
+      }
+      controls.setViewMatrix(next);
+      if (t >= 1) {
+        targetViewMatrix = null;
+      }
+    }
+
     let viewDelta = 0;
     for (let i = 0; i < 16; i++) {
       const current = controls.viewMatrix[i];
@@ -504,9 +570,11 @@ function createGui(
     temperature: number;
     tint: number;
     alpha: number;
+    animateCamera: boolean;
+    animationDuration: number;
   },
   callbacks: {
-    onCamerasLoaded: (cameras: CameraPose[]) => void;
+    onCamerasLoaded: (cameras: CameraPose[], cameraGui: any, callbacks: any) => void;
     onApplyCamera: (index: number) => void;
     onLogPose: () => void;
   },
@@ -523,29 +591,8 @@ function createGui(
 
   const cameraGui = gui.addFolder('Camera');
   cameraGui.add(renderOptions, 'fov', 20, 120, 0.1).name('FOV');
-
-  const cameraState = {
-    selectedCamera: '',
-  };
-  let cameraDropdown: any = null;
-
-  const updateCameraDropdown = (cameras: CameraPose[]) => {
-    if (cameraDropdown) {
-      cameraDropdown.destroy();
-    }
-    const cameraNames = cameras.map((c, i) => `${i + 1}: ${c.img_name}`);
-    cameraState.selectedCamera = cameraNames[0] || '';
-    cameraDropdown = cameraGui
-      .add(cameraState, 'selectedCamera', cameraNames)
-      .name('Positions')
-      .onChange((displayName: string) => {
-        const indexStr = displayName.split(':')[0];
-        const index = Number.parseInt(indexStr, 10) - 1;
-        if (index >= 0 && index < cameras.length) {
-          callbacks.onApplyCamera(index);
-        }
-      });
-  };
+  cameraGui.add(renderOptions, 'animateCamera').name('Animate Transitions');
+  cameraGui.add(renderOptions, 'animationDuration', 0, 3000, 1).name('Animation duration (ms)');
 
   cameraGui.add({
     loadCameras: () => {
@@ -558,15 +605,9 @@ function createGui(
         try {
           const parsed = JSON.parse(await file.text()) as CameraPose[];
           if (Array.isArray(parsed) && parsed.length > 0) {
-            callbacks.onCamerasLoaded(parsed);
-            updateCameraDropdown(parsed);
+            callbacks.onCamerasLoaded(parsed, cameraGui, callbacks);
             callbacks.onApplyCamera(0);
-            dom.message.textContent = `Loaded ${file.name}`;
-            setTimeout(() => {
-              if (dom.message.textContent === `Loaded ${file.name}`) {
-                dom.message.textContent = '';
-              }
-            }, 3000);
+            dom.message.textContent = '';
           }
         } catch (err) {
           dom.message.textContent = `Error loading cameras: ${err instanceof Error ? err.message : String(err)}`;
