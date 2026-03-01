@@ -51,6 +51,17 @@ async function main() {
     pointSize: 0.8,
     culling: true,
     stereoMode: 'off' as 'off' | 'anaglyph' | 'sbs',
+    brightness: 0,
+    contrast: 1,
+    gamma: 1,
+    blackLevel: 0,
+    whiteLevel: 0,
+    intensity: 1,
+    saturate: 1,
+    vibrance: 0,
+    temperature: 0,
+    tint: 0,
+    alpha: 1,
   };
   const gui = createGui(renderOptions);
   setupStereoButtons(dom, renderOptions);
@@ -281,6 +292,17 @@ async function main() {
       transition: pcTransition,
       pointSize: renderOptions.pointSize,
       stereoMode: renderOptions.stereoMode,
+      brightness: renderOptions.brightness,
+      contrast: renderOptions.contrast,
+      gamma: renderOptions.gamma,
+      blackLevel: renderOptions.blackLevel,
+      whiteLevel: renderOptions.whiteLevel,
+      intensity: renderOptions.intensity,
+      saturate: renderOptions.saturate,
+      vibrance: renderOptions.vibrance,
+      temperature: renderOptions.temperature,
+      tint: renderOptions.tint,
+      alpha: renderOptions.alpha,
     });
     const timings = renderer.consumeTimings();
 
@@ -438,11 +460,40 @@ function registerDragDrop(params: { onFile: (file: File) => Promise<void> }) {
   });
 }
 
-function createGui(renderOptions: { pointCloud: boolean; pointSize: number; culling: boolean }) {
+function createGui(renderOptions: {
+  pointCloud: boolean;
+  pointSize: number;
+  culling: boolean;
+  brightness: number;
+  contrast: number;
+  gamma: number;
+  blackLevel: number;
+  whiteLevel: number;
+  intensity: number;
+  saturate: number;
+  vibrance: number;
+  temperature: number;
+  tint: number;
+  alpha: number;
+}) {
   const gui = new GUI({ title: 'Render' });
   gui.add(renderOptions, 'pointCloud').name('Point Cloud');
   gui.add(renderOptions, 'pointSize', 0.5, 6, 0.1).name('Point Size');
   gui.add(renderOptions, 'culling').name('Spatially-Varying LOD');
+
+  const colorGui = gui.addFolder('Adjust Colors');
+  colorGui.add(renderOptions, 'brightness', -1, 1, 0.001).name('Brightness');
+  colorGui.add(renderOptions, 'contrast', 0, 3, 0.001).name('Contrast');
+  colorGui.add(renderOptions, 'gamma', 0.1, 3, 0.001).name('Gamma');
+  colorGui.add(renderOptions, 'blackLevel', -1, 1, 0.001).name('Blacklevel');
+  colorGui.add(renderOptions, 'whiteLevel', -1, 1, 0.001).name('Whitelevel');
+  colorGui.add(renderOptions, 'intensity', 0, 3, 0.001).name('Intensity');
+  colorGui.add(renderOptions, 'saturate', 0, 3, 0.001).name('Saturate');
+  colorGui.add(renderOptions, 'vibrance', -1, 1, 0.001).name('Vibrance');
+  colorGui.add(renderOptions, 'temperature', -1, 1, 0.001).name('Temperature');
+  colorGui.add(renderOptions, 'tint', -1, 1, 0.001).name('Tint');
+  colorGui.add(renderOptions, 'alpha', 0, 1, 0.001).name('Alpha');
+  colorGui.open();
   return gui;
 }
 

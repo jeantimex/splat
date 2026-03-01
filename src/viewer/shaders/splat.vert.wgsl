@@ -8,6 +8,12 @@ struct Uniforms {
   viewport: vec2<f32>,
   // x: render mode (0=splat, 1=point), y: point size, z: opacity multiplier, w: unused.
   render_params: vec4<f32>,
+  // x: brightness, y: contrast, z: gamma, w: alpha multiplier.
+  color_basic: vec4<f32>,
+  // x: black level, y: white level, z: intensity, w: saturation.
+  color_levels: vec4<f32>,
+  // x: vibrance, y: temperature, z: tint, w: unused.
+  color_mix: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;

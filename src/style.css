@@ -103,11 +103,12 @@ body {
   height: 42px;
   border: 1px solid rgba(255, 255, 255, 0.35);
   border-radius: 10px;
-  background: rgba(20, 20, 20, 0.85);
-  color: #f0f0f0;
-  font-weight: 700;
-  font-size: 13px;
+  background: rgba(20, 20, 20, 0.82);
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
   transition:
     transform 100ms ease,
     border-color 100ms ease,
@@ -124,18 +125,13 @@ body {
   background: rgba(55, 55, 55, 0.95);
 }
 
-#btn-anaglyph {
-  background: linear-gradient(
-    90deg,
-    rgba(255, 70, 70, 0.95) 0%,
-    rgba(255, 70, 70, 0.95) 48%,
-    rgba(70, 210, 255, 0.95) 52%,
-    rgba(70, 210, 255, 0.95) 100%
-  );
-  color: #0a0a0a;
+.stereo-icon {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+  pointer-events: none;
 }
 
-#btn-stereo {
-  background: linear-gradient(180deg, #f8f8f8 0%, #e4e4e4 100%);
-  color: #151515;
+.stereo-btn.active .stereo-icon {
+  filter: drop-shadow(0 0 2px rgba(255, 255, 255, 0.35));
 }

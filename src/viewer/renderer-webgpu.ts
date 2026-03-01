@@ -4,9 +4,9 @@ import fragmentShaderSource from './shaders/splat.frag.wgsl?raw';
 import anaglyphCompositeShaderSource from './shaders/anaglyph-composite.wgsl?raw';
 import crossfadeCompositeShaderSource from './shaders/crossfade-composite.wgsl?raw';
 
-// 2x mat4 + focal vec2 + viewport vec2 + render params vec4.
+// 2x mat4 + focal vec2 + viewport vec2 + render params vec4 + color params (3x vec4).
 // See WGSL Uniforms struct for exact layout.
-const UNIFORM_FLOATS = 40;
+const UNIFORM_FLOATS = 52;
 const UNIFORM_BYTES = UNIFORM_FLOATS * 4;
 
 export interface RenderState {
@@ -21,6 +21,17 @@ export interface RenderState {
   transition: number;
   pointSize: number;
   stereoMode: 'off' | 'anaglyph' | 'sbs';
+  brightness: number;
+  contrast: number;
+  gamma: number;
+  blackLevel: number;
+  whiteLevel: number;
+  intensity: number;
+  saturate: number;
+  vibrance: number;
+  temperature: number;
+  tint: number;
+  alpha: number;
 }
 
 export interface WebGPURenderer {
@@ -91,7 +102,11 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
 
   const bindGroupLayout = device.createBindGroupLayout({
     entries: [
-      { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
+      {
+        binding: 0,
+        visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+        buffer: { type: 'uniform' },
+      },
       { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
     ],
@@ -308,6 +323,18 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
       uniformData[37] = state.pointSize;
       uniformData[38] = opacity;
       uniformData[39] = 0;
+      uniformData[40] = state.brightness;
+      uniformData[41] = state.contrast;
+      uniformData[42] = state.gamma;
+      uniformData[43] = state.alpha;
+      uniformData[44] = state.blackLevel;
+      uniformData[45] = state.whiteLevel;
+      uniformData[46] = state.intensity;
+      uniformData[47] = state.saturate;
+      uniformData[48] = state.vibrance;
+      uniformData[49] = state.temperature;
+      uniformData[50] = state.tint;
+      uniformData[51] = 0;
       device.queue.writeBuffer(ub, 0, uniformData);
     };
     const halfWidthProjection = (): Mat4 => {

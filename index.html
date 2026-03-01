@@ -13,11 +13,23 @@
       <div id="dropzone">Drop a `.splat` or `.ply` file here</div>
       <canvas id="canvas"></canvas>
       <div id="stereo-controls" aria-label="Stereo controls">
-        <button id="btn-anaglyph" class="stereo-btn" type="button" aria-pressed="false">
-          <span class="label">3D</span>
+        <button
+          id="btn-anaglyph"
+          class="stereo-btn"
+          type="button"
+          aria-pressed="false"
+          aria-label="Toggle anaglyph mode"
+        >
+          <img class="stereo-icon" src="/assets/icon_anaglyph.png" alt="" aria-hidden="true" />
         </button>
-        <button id="btn-stereo" class="stereo-btn" type="button" aria-pressed="false">
-          <span class="label">VR</span>
+        <button
+          id="btn-stereo"
+          class="stereo-btn"
+          type="button"
+          aria-pressed="false"
+          aria-label="Toggle side-by-side VR mode"
+        >
+          <img class="stereo-icon" src="/assets/icon_vr.png" alt="" aria-hidden="true" />
         </button>
       </div>
       <div id="quality"><span id="fps"></span></div>
