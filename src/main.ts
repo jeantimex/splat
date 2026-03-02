@@ -48,7 +48,6 @@ async function main() {
   const renderOptions = {
     pointCloud: false,
     pointSize: 0.8,
-    culling: true,
     stereoMode: 'off' as 'off' | 'anaglyph' | 'sbs',
     fov: 35,
     splatScale: 1,
@@ -367,7 +366,7 @@ async function main() {
       (maxViewProjDelta > 0.0005 && timeSincePost >= postIntervalMs) ||
       timeSincePost >= 220;
     if (shouldPostView) {
-      sortWorker.postViewProjection(viewProj, renderOptions.culling);
+      sortWorker.postViewProjection(viewProj);
       for (let i = 0; i < 16; i++) {
         lastPostedViewProj[i] = viewProj[i];
       }
@@ -555,7 +554,6 @@ function createGui(
   renderOptions: {
     pointCloud: boolean;
     pointSize: number;
-    culling: boolean;
     fov: number;
     splatScale: number;
     antialias: number;
@@ -584,7 +582,6 @@ function createGui(
   const splatGui = gui.addFolder('Splat Settings');
   splatGui.add(renderOptions, 'pointCloud').name('Point Cloud');
   splatGui.add(renderOptions, 'pointSize', 0.5, 6, 0.1).name('Point Size');
-  splatGui.add(renderOptions, 'culling').name('Spatially-Varying LOD');
   splatGui.add(renderOptions, 'splatScale', 0, 1, 0.001).name('Splatscale');
   splatGui.add(renderOptions, 'antialias', 0, 4, 0.001).name('Antialias');
   splatGui.close();
