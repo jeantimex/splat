@@ -49,7 +49,7 @@ async function main() {
     pointCloud: false,
     pointSize: 0.8,
     stereoMode: 'off' as 'off' | 'anaglyph' | 'sbs',
-    fov: 35,
+    fov: 75,
     splatScale: 1,
     antialias: 0.3,
     brightness: 0,
@@ -193,6 +193,45 @@ async function main() {
       renderer.setSplatData(splatData, vertexCount);
       dom.message.textContent = '';
       dom.dropzone.classList.add('hidden');
+
+      // Center camera on the bounding box of the splat data.
+      if (vertexCount > 0) {
+        let avgX = 0, avgY = 0, avgZ = 0;
+        const sampleSize = Math.min(vertexCount, 10000);
+        const step = Math.floor(vertexCount / sampleSize) * 8;
+        const positions = new Float32Array(sampleSize * 3);
+        for (let i = 0; i < sampleSize; i++) {
+            const x = new Float32Array(splatData.buffer, i * step * 4, 1)[0];
+            const y = new Float32Array(splatData.buffer, (i * step + 1) * 4, 1)[0];
+            const z = new Float32Array(splatData.buffer, (i * step + 2) * 4, 1)[0];
+            avgX += x;
+            avgY += y;
+            avgZ += z;
+            positions[i*3] = x;
+            positions[i*3+1] = y;
+            positions[i*3+2] = z;
+        }
+        const center = [avgX / sampleSize, avgY / sampleSize, avgZ / sampleSize];
+
+        // Get current camera orientation (Forward, Right, Up vectors from current view matrix).
+        const nR = [controls.viewMatrix[0], controls.viewMatrix[4], controls.viewMatrix[8]];
+        const nU = [controls.viewMatrix[1], controls.viewMatrix[5], controls.viewMatrix[9]];
+        const nF = [controls.viewMatrix[2], controls.viewMatrix[6], controls.viewMatrix[10]];
+
+        // Set camera position directly to the center.
+        const camPos = center;
+        
+        const nextView: Mat4 = [
+            nR[0], nU[0], nF[0], 0,
+            nR[1], nU[1], nF[1], 0,
+            nR[2], nU[2], nF[2], 0,
+            -camPos[0]*nR[0] - camPos[1]*nU[0] - camPos[2]*nF[0],
+            -camPos[0]*nR[1] - camPos[1]*nU[1] - camPos[2]*nF[1],
+            -camPos[0]*nR[2] - camPos[1]*nU[2] - camPos[2]*nF[2],
+            1
+        ];
+        controls.setViewMatrix(nextView);
+      }
     },
     // Optional conversion callback (PLY -> SPLAT buffer).
     // In our current UX we do not auto-save on drop, but we keep download support

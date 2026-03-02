@@ -98,19 +98,6 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
     let sdx = dx;
     let sdy = dy;
 
-    // Directional snapping for orbit mode:
-    // If movement is primarily along one axis (3:1 ratio or ~18 degrees),
-    // snap to that axis to prevent accidental drift.
-    if (dragMode === 'orbit') {
-      const adx = Math.abs(dx);
-      const ady = Math.abs(dy);
-      if (adx > ady * 3) {
-        sdy = 0;
-      } else if (ady > adx * 3) {
-        sdx = 0;
-      }
-    }
-
     const inv = invert4(viewMatrix);
     if (!inv) return;
 
@@ -118,16 +105,18 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
       const d = 4;
       let next = translate4(inv, 0, 0, d);
       // Rotate around world Y to keep the horizon level.
-      // viewMatrix[4..6] is the world Y axis [0,1,0] expressed in camera-local
-      // coordinates. Using camera-local Y (0,1,0) instead would cause the
-      // horizon to roll whenever the camera is pitched up or down.
-      // We normalize the axis to prevent drift-induced scaling.
       const axisY = [viewMatrix[4], viewMatrix[5], viewMatrix[6]];
       const axisYLen = Math.hypot(axisY[0], axisY[1], axisY[2]);
       if (axisYLen > 1e-6) {
         next = rotate4(next, 5 * sdx, axisY[0] / axisYLen, axisY[1] / axisYLen, axisY[2] / axisYLen);
       }
-      next = rotate4(next, -5 * sdy, 1, 0, 0);
+      
+      // Clamp pitch to prevent flipping over the poles (axisY[2] is world-up's Z in camera space).
+      const currentPitch = axisY[2] / axisYLen;
+      if ((sdy > 0 && currentPitch < 0.98) || (sdy < 0 && currentPitch > -0.98)) {
+        next = rotate4(next, -5 * sdy, 1, 0, 0);
+      }
+
       next = translate4(next, 0, 0, -d);
       const out = invert4(next);
       if (out) viewMatrix = out;
@@ -193,7 +182,14 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
             axisY[2] / axisYLen,
           );
         }
-        next = rotate4(next, -5 * orbitVelocity.dy * dtFactor, 1, 0, 0);
+        
+        // Apply pitch inertia with clamping.
+        const currentPitch = axisY[2] / axisYLen;
+        const pitchDelta = -5 * orbitVelocity.dy * dtFactor;
+        if ((pitchDelta > 0 && currentPitch < 0.98) || (pitchDelta < 0 && currentPitch > -0.98)) {
+          next = rotate4(next, pitchDelta, 1, 0, 0);
+        }
+
         next = translate4(next, 0, 0, -d);
         const out = invert4(next);
         if (out) viewMatrix = out;
