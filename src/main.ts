@@ -51,6 +51,28 @@ interface RenderOptions {
   animationDuration: number;
 }
 
+const DEFAULT_RENDER_OPTIONS: RenderOptions = {
+  pointCloud: false,
+  pointSize: 0.8,
+  stereoMode: 'off',
+  fov: 75,
+  splatScale: 1,
+  antialias: 0.3,
+  brightness: 0,
+  contrast: 1,
+  gamma: 1,
+  blackLevel: 0,
+  whiteLevel: 0,
+  intensity: 1,
+  saturate: 1,
+  vibrance: 0,
+  temperature: 0,
+  tint: 0,
+  alpha: 1,
+  animateCamera: true,
+  animationDuration: 1350,
+};
+
 const dom = getViewerDom();
 
 async function main() {
@@ -67,27 +89,7 @@ async function main() {
   // - GUI: runtime toggles
   const renderer = await createWebGPURenderer(dom.canvas);
   const controls = createControls(dom.canvas);
-  const renderOptions = {
-    pointCloud: false,
-    pointSize: 0.8,
-    stereoMode: 'off' as 'off' | 'anaglyph' | 'sbs',
-    fov: 75,
-    splatScale: 1,
-    antialias: 0.3,
-    brightness: 0,
-    contrast: 1,
-    gamma: 1,
-    blackLevel: 0,
-    whiteLevel: 0,
-    intensity: 1,
-    saturate: 1,
-    vibrance: 0,
-    temperature: 0,
-    tint: 0,
-    alpha: 1,
-    animateCamera: true,
-    animationDuration: 1350,
-  };
+  const renderOptions = { ...DEFAULT_RENDER_OPTIONS };
   let cameras: CameraPose[] = [...DEFAULT_CAMERAS];
   let currentCameraIndex = 0;
 
@@ -165,8 +167,13 @@ async function main() {
       };
       console.log('Current Camera Pose:', JSON.stringify(pose, null, 2));
     },
+    onReset: () => {
+      Object.assign(renderOptions, DEFAULT_RENDER_OPTIONS);
+      gui.controllersRecursive().forEach((c) => c.updateDisplay());
+      updateStereoUi();
+    },
   });
-  setupStereoButtons(dom, renderOptions);
+  const updateStereoUi = setupStereoButtons(dom, renderOptions);
 
   const cameraGui = gui.folders.find((f) => f._title === 'Camera');
 
@@ -623,9 +630,21 @@ function createGui(
     onCamerasLoaded: (cameras: CameraPose[], cameraGui: any, callbacks: any) => void;
     onApplyCamera: (index: number) => void;
     onLogPose: () => void;
+    onReset: () => void;
   },
 ) {
   const gui = new GUI({ title: 'Render' });
+
+  gui
+    .add(
+      {
+        reset: () => {
+          callbacks.onReset();
+        },
+      },
+      'reset',
+    )
+    .name('Reset All Settings');
 
   const splatGui = gui.addFolder('Splat Settings');
   splatGui.add(renderOptions, 'pointCloud').name('Point Cloud');
@@ -728,4 +747,5 @@ function setupStereoButtons(
   });
 
   updateUi();
+  return updateUi;
 }

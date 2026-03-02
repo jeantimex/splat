@@ -142,7 +142,7 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
     }
   });
 
-  window.addEventListener(
+  canvas.addEventListener(
     'wheel',
     (event) => {
       event.preventDefault();

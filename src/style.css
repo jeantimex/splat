@@ -76,8 +76,12 @@ body {
   left: auto !important;
   right: 12px !important;
   top: 12px !important;
-  bottom: auto !important;
   z-index: 20;
+}
+
+.lil-gui.root > .children {
+  max-height: calc(100vh - 60px); /* Account for title bar and spacing */
+  overflow-y: auto;
 }
 
 #stereo-controls {
