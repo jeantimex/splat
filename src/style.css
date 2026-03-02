@@ -29,6 +29,36 @@ body {
   font-size: 18px;
 }
 
+/* Loading spinner */
+#spinner {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 10;
+}
+
+#spinner.hidden {
+  display: none;
+}
+
+.spinner-ring {
+  width: 48px;
+  height: 48px;
+  border: 3px solid rgba(255, 255, 255, 0.15);
+  border-top-color: rgba(255, 255, 255, 0.8);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 #dropzone {
   position: absolute;
   left: 50%;
@@ -45,7 +75,13 @@ body {
   font-size: 14px;
   line-height: 1.4;
   z-index: 3;
-  pointer-events: none;
+  cursor: pointer;
+  transition: border-color 150ms ease, background 150ms ease;
+}
+
+#dropzone:hover {
+  border-color: rgba(255, 255, 255, 0.7);
+  background: rgba(0, 0, 0, 0.55);
 }
 
 #dropzone.hidden {

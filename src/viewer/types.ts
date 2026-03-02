@@ -8,6 +8,7 @@
 export interface ViewerDom {
   canvas: HTMLCanvasElement;
   message: HTMLDivElement;
+  spinner: HTMLDivElement;
   fps: HTMLSpanElement;
   progress: HTMLDivElement;
   dropzone: HTMLDivElement;

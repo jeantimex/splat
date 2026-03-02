@@ -50,7 +50,7 @@ import {
 } from './viewer/camera';
 import { centerCamera, getEyeViewMatrix } from './viewer/camera-utils';
 import { createControls } from './viewer/controls';
-import { getViewerDom, setupStereoButtons } from './viewer/dom';
+import { getViewerDom, hideSpinner, setupStereoButtons, showSpinner } from './viewer/dom';
 import { createGui, type GuiCallbacks } from './viewer/gui';
 import { registerDragDrop, registerKeyboardShortcuts } from './viewer/input';
 import { SPLAT_ROW_BYTES } from './viewer/loader';
@@ -262,7 +262,7 @@ async function main() {
     onSplatData: ({ splatData, vertexCount }) => {
       loadedVertices = vertexCount;
       renderer.setSplatData(splatData, vertexCount);
-      dom.message.textContent = '';
+      hideSpinner(dom);
       dom.dropzone.classList.add('hidden');
       centerCamera(splatData, vertexCount, controls);
     },
@@ -298,11 +298,12 @@ async function main() {
     setViewFromHash(location.hash.slice(1));
   });
 
-  // Register drag-and-drop file handling
+  // Register drag-and-drop and click-to-upload file handling
   registerDragDrop({
+    dropzone: dom.dropzone,
     onFile: async (file) => {
       controls.setCarousel(false);
-      dom.message.textContent = `Loading ${file.name}...`;
+      showSpinner(dom);
 
       // Handle camera JSON files
       if (/\.json$/i.test(file.name)) {
@@ -313,7 +314,7 @@ async function main() {
             updateCameraDropdown(parsed, cameraGui, guiCallbacks);
           }
           applyCamera(0);
-          dom.message.textContent = '';
+          hideSpinner(dom);
         }
         return;
       }
@@ -327,8 +328,7 @@ async function main() {
 
       loadedVertices = Math.floor(buffer.byteLength / SPLAT_ROW_BYTES);
       sortWorker.postSplatBuffer(buffer, loadedVertices);
-      dom.message.textContent = '';
-      dom.dropzone.classList.add('hidden');
+      // Note: hideSpinner is called in onSplatData callback
     },
   });
 

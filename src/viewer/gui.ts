@@ -8,6 +8,7 @@
 
 import GUI from 'lil-gui';
 import type { CameraPose } from './camera';
+import { hideSpinner, showSpinner } from './dom';
 import type { RenderOptions, ViewerDom } from './types';
 
 /** Callbacks for GUI interactions */
@@ -75,14 +76,16 @@ export function createGui(
           input.onchange = async () => {
             const file = input.files?.[0];
             if (!file) return;
+            showSpinner(dom);
             try {
               const parsed = JSON.parse(await file.text()) as CameraPose[];
               if (Array.isArray(parsed) && parsed.length > 0) {
                 callbacks.onCamerasLoaded(parsed, cameraGui, callbacks);
                 callbacks.onApplyCamera(0);
-                dom.message.textContent = '';
               }
+              hideSpinner(dom);
             } catch (err) {
+              hideSpinner(dom);
               dom.message.textContent = `Error loading cameras: ${err instanceof Error ? err.message : String(err)}`;
             }
           };

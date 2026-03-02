@@ -19,17 +19,42 @@ export function getViewerDom(): ViewerDom {
 
   const canvas = app.querySelector<HTMLCanvasElement>('#canvas');
   const message = app.querySelector<HTMLDivElement>('#message');
+  const spinner = app.querySelector<HTMLDivElement>('#spinner');
   const fps = app.querySelector<HTMLSpanElement>('#fps');
   const progress = app.querySelector<HTMLDivElement>('#progress');
   const dropzone = app.querySelector<HTMLDivElement>('#dropzone');
   const anaglyphButton = app.querySelector<HTMLButtonElement>('#btn-anaglyph');
   const stereoButton = app.querySelector<HTMLButtonElement>('#btn-stereo');
 
-  if (!canvas || !message || !fps || !progress || !dropzone || !anaglyphButton || !stereoButton) {
+  if (
+    !canvas ||
+    !message ||
+    !spinner ||
+    !fps ||
+    !progress ||
+    !dropzone ||
+    !anaglyphButton ||
+    !stereoButton
+  ) {
     throw new Error('Missing viewer DOM nodes');
   }
 
-  return { canvas, message, fps, progress, dropzone, anaglyphButton, stereoButton };
+  return { canvas, message, spinner, fps, progress, dropzone, anaglyphButton, stereoButton };
+}
+
+/**
+ * Shows the loading spinner.
+ */
+export function showSpinner(dom: ViewerDom): void {
+  dom.spinner.classList.remove('hidden');
+  dom.dropzone.classList.add('hidden');
+}
+
+/**
+ * Hides the loading spinner.
+ */
+export function hideSpinner(dom: ViewerDom): void {
+  dom.spinner.classList.add('hidden');
 }
 
 /**
