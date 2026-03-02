@@ -1,3 +1,52 @@
+/**
+ * =============================================================================
+ * CAMERA CONTROLS FOR 3D GAUSSIAN SPLATTING VIEWER
+ * =============================================================================
+ *
+ * This module provides interactive camera controls for exploring 3DGS scenes.
+ *
+ * CONTROL MODES:
+ * --------------
+ * 1. ORBIT (default drag)
+ *    - Rotate camera around a focus point
+ *    - Horizontal drag: rotate around world Y (yaw)
+ *    - Vertical drag: rotate around camera X (pitch)
+ *    - Keeps horizon level for natural navigation
+ *
+ * 2. PAN (Ctrl/Cmd + drag, or right-click drag)
+ *    - Translate camera parallel to view plane
+ *    - Horizontal drag: move camera left/right
+ *    - Vertical drag: move camera up/down
+ *
+ * 3. ROLL (Shift + drag)
+ *    - Rotate camera around its forward axis
+ *    - Horizontal drag: clockwise/counter-clockwise roll
+ *
+ * 4. ZOOM (mouse wheel)
+ *    - Move camera forward/backward along view direction
+ *    - Scroll up: move closer to scene
+ *    - Scroll down: move away from scene
+ *
+ * INERTIA SYSTEM:
+ * ---------------
+ * All controls have momentum for smooth, natural-feeling interaction:
+ * - Velocity is captured during drag
+ * - On release, velocity decays exponentially
+ * - Provides smooth coasting after quick gestures
+ *
+ * The decay is frame-rate independent using: velocity *= decay^(dt/frame_time)
+ *
+ * KEYBOARD CONTROLS:
+ * ------------------
+ * - Arrow keys: Translate camera (forward/back/left/right)
+ * - WASD: Rotate camera (pitch/yaw)
+ *
+ * CAROUSEL MODE:
+ * --------------
+ * An automated orbit mode that slowly rotates the camera for showcasing.
+ * Disabled automatically when user interacts with the scene.
+ */
+
 import {
   DEFAULT_INTRINSICS,
   DEFAULT_VIEW_MATRIX,
@@ -8,34 +57,80 @@ import {
   type Mat4,
 } from './camera';
 
+/** Public interface for camera controls */
 interface ControlsState {
+  /** Camera intrinsic parameters (focal lengths) */
   camera: CameraIntrinsics;
+  /** Current view matrix (world → camera transform) */
   viewMatrix: Mat4;
+  /** True if user is currently interacting (dragging or keys held) */
   isInteracting: boolean;
+  /** Set the view matrix directly (for camera presets) */
   setViewMatrix: (matrix: Mat4) => void;
+  /** Enable/disable carousel auto-rotation mode */
   setCarousel: (enabled: boolean) => void;
+  /** Update function called each frame with delta time */
   update: (dtMs: number) => void;
 }
 
+/**
+ * Creates camera controls attached to the given canvas.
+ *
+ * The controls manipulate the VIEW MATRIX, which transforms world
+ * coordinates to camera coordinates. To move the camera forward,
+ * we actually translate the world backward (hence the inverse operations).
+ *
+ * @param canvas The canvas element to attach input handlers to
+ * @returns ControlsState object for interacting with the camera
+ */
 export function createControls(canvas: HTMLCanvasElement): ControlsState {
+  // ============================================================================
+  // CONTROL STATE
+  // ============================================================================
+
+  /** Current camera view matrix (transforms world → camera space) */
   let viewMatrix: Mat4 = [...DEFAULT_VIEW_MATRIX];
+
+  /** Carousel mode enabled (auto-rotation for showcase) */
   let carousel = false;
+  /** Time when carousel mode was started (for animation timing) */
   let carouselStart = performance.now();
+
+  /** Currently pressed keyboard keys */
   const activeKeys = new Set<string>();
 
+  // ============================================================================
+  // MOUSE DRAG STATE
+  // ============================================================================
+
+  /** Whether mouse is currently being dragged */
   let isDragging = false;
+  /** Current drag mode: orbit (rotate), pan (translate), or roll */
   let dragMode: 'orbit' | 'pan' | 'roll' = 'orbit';
+  /** Last mouse position for computing deltas */
   let lastX = 0;
   let lastY = 0;
+  /** Timestamp of last mouse move (for stale drag detection) */
   let lastDragMoveAt = 0;
 
-  // Inertia velocities. Orbit/pan store the normalised screen-space deltas from
-  // the most recent drag event; scroll accumulates wheel deltas. All three decay
-  // exponentially in update() once the input stops.
-  // INERTIA_DECAY is the fraction retained per 60 fps frame; the exponent in
-  // update() makes it frame-rate independent.
-  const INERTIA_DECAY = 0.92;
-  const SCROLL_DECAY = 0.5;
+  // ============================================================================
+  // INERTIA SYSTEM
+  // ============================================================================
+  /**
+   * Inertia provides smooth camera motion after user interaction stops.
+   *
+   * Each control mode has its own velocity:
+   * - orbitVelocity: rotation speed (normalized screen deltas)
+   * - panVelocity: translation speed (normalized screen deltas)
+   * - rollVelocity: roll rotation speed
+   * - scrollVelocity: zoom speed
+   *
+   * Velocities decay exponentially: v *= decay^(dt/reference_frame_time)
+   * This ensures consistent feel regardless of frame rate.
+   */
+  const INERTIA_DECAY = 0.92;  // Fraction retained per 60fps frame for orbit/pan
+  const SCROLL_DECAY = 0.5;    // Faster decay for scroll (feels more responsive)
+
   let orbitVelocity = { dx: 0, dy: 0 };
   let panVelocity = { dx: 0, dy: 0 };
   let rollVelocity = 0;
@@ -102,31 +197,62 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
     if (!inv) return;
 
     if (dragMode === 'orbit') {
-      const d = 4;
-      let next = translate4(inv, 0, 0, d);
-      // Rotate around world Y to keep the horizon level.
+      /**
+       * ORBIT CONTROL - Arcball-style camera rotation
+       * =============================================
+       *
+       * The orbit works by:
+       * 1. Move camera backward to orbit distance (translate +Z)
+       * 2. Apply rotations around the origin
+       * 3. Move camera forward back to original distance (translate -Z)
+       *
+       * This creates the effect of orbiting around a point 'd' units
+       * in front of the camera.
+       *
+       * HORIZON LOCK:
+       * We rotate around the WORLD Y-axis (up) for horizontal motion,
+       * not the camera's Y-axis. This keeps the horizon level as the
+       * user orbits, which feels more natural.
+       *
+       * To find world-Y in view matrix coordinates, we read column 1
+       * (the camera's Y basis vector in world space).
+       */
+      const d = 4;  // Orbit distance (units in front of camera)
+      let next = translate4(inv, 0, 0, d);  // Step back to orbit point
+
+      // Extract camera's Y-axis (world up) from view matrix
       const axisY = [viewMatrix[4], viewMatrix[5], viewMatrix[6]];
       const axisYLen = Math.hypot(axisY[0], axisY[1], axisY[2]);
+
+      // Yaw: rotate around world Y (horizontal drag)
       if (axisYLen > 1e-6) {
         next = rotate4(
           next,
-          5 * sdx,
+          5 * sdx,  // Scale factor for sensitivity
           axisY[0] / axisYLen,
           axisY[1] / axisYLen,
           axisY[2] / axisYLen,
         );
       }
 
-      // Clamp pitch to prevent flipping over the poles (axisY[2] is world-up's Z in camera space).
+      /**
+       * PITCH CLAMPING
+       * Prevent the camera from flipping over the poles (gimbal lock avoidance).
+       *
+       * axisY[2] represents how aligned the camera's up is with world Z.
+       * When |axisY[2]| ≈ 1, camera is looking nearly straight up or down.
+       * Clamping at 0.98 (~78°) prevents uncomfortable flipping.
+       */
       const currentPitch = axisY[2] / axisYLen;
       if ((sdy > 0 && currentPitch < 0.98) || (sdy < 0 && currentPitch > -0.98)) {
-        next = rotate4(next, -5 * sdy, 1, 0, 0);
+        next = rotate4(next, -5 * sdy, 1, 0, 0);  // Pitch around camera X
       }
 
-      next = translate4(next, 0, 0, -d);
+      next = translate4(next, 0, 0, -d);  // Step forward to original distance
       const out = invert4(next);
       if (out) viewMatrix = out;
-      // Snapshot the delta so update() can coast after release.
+
+      // Store velocity for inertia (coasting after release)
       orbitVelocity = { dx: sdx, dy: sdy };
     } else if (dragMode === 'roll') {
       // Rotate around the camera's local Z axis (the forward axis).

@@ -1,3 +1,40 @@
+/**
+ * =============================================================================
+ * 3D GAUSSIAN SPLATTING (3DGS) VIEWER - MAIN APPLICATION ENTRY POINT
+ * =============================================================================
+ *
+ * This file is the main entry point for a real-time 3D Gaussian Splatting viewer
+ * built with WebGPU. 3DGS is a novel view synthesis technique that represents
+ * scenes as collections of 3D Gaussian primitives, each with:
+ *
+ *   - Position (x, y, z): The center of the Gaussian in world space
+ *   - Covariance (3x3 matrix): Defines the shape/orientation of the ellipsoid
+ *   - Color (RGB): Typically stored as spherical harmonics coefficients
+ *   - Opacity (alpha): Transparency of the Gaussian
+ *
+ * HOW 3DGS RENDERING WORKS (HIGH-LEVEL OVERVIEW):
+ * ------------------------------------------------
+ * 1. LOAD: Parse .splat or .ply files containing Gaussian parameters
+ * 2. PREPROCESS: Convert raw data into GPU-friendly packed format
+ * 3. SORT: Order Gaussians back-to-front based on camera view (CPU worker)
+ * 4. RENDER: For each Gaussian (as instanced quads):
+ *    a. Project 3D Gaussian center to screen space
+ *    b. Compute 2D covariance from 3D covariance via Jacobian of projection
+ *    c. Extract ellipse axes from eigenvalues of 2D covariance
+ *    d. Expand quad vertices along ellipse axes
+ *    e. In fragment shader: evaluate Gaussian falloff and alpha-blend
+ *
+ * ARCHITECTURE:
+ * - Main thread: Orchestrates rendering, handles UI, manages camera
+ * - Web Worker: Handles CPU-intensive sorting and PLY parsing off main thread
+ * - WebGPU: GPU-accelerated rendering with instanced draw calls
+ *
+ * KEY CONCEPTS:
+ * - Alpha Blending: Gaussians are semi-transparent; correct ordering is crucial
+ * - Splatting: Each Gaussian "splats" onto the screen as a 2D ellipse
+ * - Depth Sorting: Back-to-front ordering ensures proper alpha composition
+ */
+
 import './style.css';
 import GUI from 'lil-gui';
 import { createControls } from './viewer/controls';
@@ -15,10 +52,14 @@ import {
 import { SPLAT_ROW_BYTES } from './viewer/loader';
 import { createSortWorker } from './viewer/sort-worker';
 
-// ASCII bytes for the text "ply\n".
-// We use this fast signature check to route dropped files into the PLY decode path.
+/**
+ * ASCII bytes for the text "ply\n" (112='p', 108='l', 121='y', 10='\n').
+ * PLY (Polygon File Format) is a common format for 3D Gaussian Splatting data.
+ * We use this magic number to quickly identify PLY files vs raw .splat files.
+ */
 const PLY_MAGIC = [112, 108, 121, 10];
 
+/** DOM element references for the viewer UI */
 interface ViewerDom {
   canvas: HTMLCanvasElement;
   message: HTMLDivElement;
@@ -29,25 +70,55 @@ interface ViewerDom {
   stereoButton: HTMLButtonElement;
 }
 
+/**
+ * Runtime rendering options that affect how Gaussians are displayed.
+ *
+ * These parameters control the visual appearance and can be adjusted in real-time:
+ * - pointCloud: Toggle between Gaussian splatting and simple point cloud rendering
+ * - splatScale: Scale factor for Gaussian ellipse size (affects visual density)
+ * - antialias: Low-pass filter strength to reduce aliasing on small splats
+ *
+ * The color grading options (brightness, contrast, gamma, etc.) are applied
+ * in the fragment shader after computing the Gaussian contribution.
+ */
 interface RenderOptions {
+  /** When true, render as simple points instead of Gaussian ellipses */
   pointCloud: boolean;
+  /** Size of points in point cloud mode (in pixels) */
   pointSize: number;
+  /** Stereo rendering mode for VR/3D viewing */
   stereoMode: 'off' | 'anaglyph' | 'sbs';
+  /** Vertical field of view in degrees */
   fov: number;
+  /** Multiplier for Gaussian ellipse size (1.0 = original size from training) */
   splatScale: number;
+  /** Anti-aliasing filter strength added to 2D covariance diagonal */
   antialias: number;
+  /** Additive brightness adjustment (-1 to 1) */
   brightness: number;
+  /** Multiplicative contrast (0 = gray, 1 = normal, >1 = enhanced) */
   contrast: number;
+  /** Gamma correction exponent (1.0 = linear) */
   gamma: number;
+  /** Shadow lift/crush control */
   blackLevel: number;
+  /** Highlight lift/crush control */
   whiteLevel: number;
+  /** Overall intensity multiplier */
   intensity: number;
+  /** Color saturation (0 = grayscale, 1 = normal) */
   saturate: number;
+  /** Vibrance (selective saturation for less saturated colors) */
   vibrance: number;
+  /** Color temperature shift (negative = cooler, positive = warmer) */
   temperature: number;
+  /** Green/magenta tint shift */
   tint: number;
+  /** Global alpha multiplier for all Gaussians */
   alpha: number;
+  /** Enable smooth camera transitions between preset positions */
   animateCamera: boolean;
+  /** Duration of camera transition animation in milliseconds */
   animationDuration: number;
 }
 
@@ -75,6 +146,28 @@ const DEFAULT_RENDER_OPTIONS: RenderOptions = {
 
 const dom = getViewerDom();
 
+/**
+ * Main application entry point.
+ *
+ * Initializes all subsystems required for 3DGS rendering:
+ * 1. WebGPU context and render pipelines
+ * 2. Camera controls (orbit, pan, zoom)
+ * 3. Sort worker for depth ordering
+ * 4. GUI for runtime parameter adjustment
+ * 5. Animation loop for continuous rendering
+ *
+ * The core rendering pipeline follows this flow each frame:
+ *
+ *   [Camera Update] → [View Matrix] → [Sort Worker]
+ *         ↓                               ↓
+ *   [Projection Matrix]           [Sorted Indices]
+ *         ↓                               ↓
+ *         └──────────────┬────────────────┘
+ *                        ↓
+ *                  [GPU Render]
+ *                        ↓
+ *               [Alpha-Blended Output]
+ */
 async function main() {
   // Hard fail early when WebGPU is unavailable so we do not initialize
   // event listeners or workers that can never render.
@@ -83,10 +176,16 @@ async function main() {
     return;
   }
 
-  // Core subsystems:
-  // - renderer: WebGPU resources + draw calls
-  // - controls: input -> view matrix updates
-  // - GUI: runtime toggles
+  /**
+   * Core subsystems:
+   * - renderer: WebGPU resources + draw calls (handles GPU buffer management)
+   * - controls: input -> view matrix updates (orbit/pan/zoom camera)
+   * - GUI: runtime toggles for visual parameters
+   *
+   * The renderer uses instanced drawing where each Gaussian is one instance.
+   * A single quad (4 vertices) is expanded per-instance based on the
+   * Gaussian's projected 2D covariance ellipse.
+   */
   const renderer = await createWebGPURenderer(dom.canvas);
   const controls = createControls(dom.canvas);
   const renderOptions = { ...DEFAULT_RENDER_OPTIONS };
@@ -205,18 +304,51 @@ async function main() {
     location.hash = `#${encodeURIComponent(encodeViewMatrix(controls.viewMatrix))}`;
   };
 
-  // Worker owns CPU-heavy preprocessing:
-  // 1) optional .ply -> internal splat buffer conversion
-  // 2) per-frame depth sorting for correct alpha composition
-  // Main thread only uploads worker outputs to GPU.
+  /**
+   * SORT WORKER - Critical for Correct Alpha Blending
+   * ================================================
+   *
+   * 3D Gaussian Splatting requires back-to-front rendering order for correct
+   * alpha compositing. Since Gaussians overlap and are semi-transparent,
+   * drawing them in the wrong order produces incorrect colors.
+   *
+   * The sort worker handles CPU-intensive tasks off the main thread:
+   *
+   * 1. PLY PARSING: Convert standard Gaussian PLY files to our internal format
+   *    - Extract position, scale, rotation (quaternion), color, opacity
+   *    - Precompute 3D covariance matrix from rotation and scale
+   *    - Pack data into GPU-friendly uint32 arrays
+   *
+   * 2. DEPTH SORTING: Every frame (or when camera moves significantly)
+   *    - Compute view-space depth for each Gaussian center
+   *    - Use counting sort (O(n)) for fast sorting of millions of splats
+   *    - Return sorted index array to main thread for GPU upload
+   *
+   * The sorting algorithm uses the view direction dot product for depth:
+   *   depth = viewDir.x * pos.x + viewDir.y * pos.y + viewDir.z * pos.z
+   *
+   * This is an approximation (doesn't account for Gaussian extent) but is
+   * fast enough for real-time rendering and produces good visual results.
+   */
   const sortWorker = createSortWorker({
+    /**
+     * Called when worker completes depth sorting.
+     * The depthIndex array contains Gaussian indices in back-to-front order.
+     * GPU will draw instances in this order for correct alpha blending.
+     */
     onSortResult: ({ depthIndex, sortMs }) => {
       renderer.setSortedIndices(depthIndex);
       sortMsSample = sortMs;
       sortMsPending = true;
     },
-    // Worker has rebuilt packed GPU payload.
-    // Upload to renderer and hide startup UI once first payload arrives.
+    /**
+     * Called when worker finishes preprocessing splat data.
+     * The splatData array contains packed GPU payload:
+     * - Position (3x float32 as uint32 bit patterns)
+     * - Covariance upper triangle (6x float16 packed into 3x uint32)
+     * - Color RGBA8 (packed into 1x uint32)
+     * Total: 8 uint32 = 32 bytes per Gaussian
+     */
     onSplatData: ({ splatData, vertexCount }) => {
       loadedVertices = vertexCount;
       renderer.setSplatData(splatData, vertexCount);
@@ -225,9 +357,11 @@ async function main() {
 
       centerCamera(splatData, vertexCount, controls);
     },
-    // Optional conversion callback (PLY -> SPLAT buffer).
-    // In our current UX we do not auto-save on drop, but we keep download support
-    // for other flows that may set save=true.
+    /**
+     * Optional conversion callback (PLY -> SPLAT buffer).
+     * In our current UX we do not auto-save on drop, but we keep download support
+     * for other flows that may set save=true.
+     */
     onConvertedBuffer: (buffer, save) => {
       const uint = new Uint8Array(buffer);
       loadedVertices = Math.floor(uint.byteLength / SPLAT_ROW_BYTES);
@@ -302,11 +436,50 @@ async function main() {
   let smoothedUploadMs = 0;
   let smoothedRenderMs = 0;
 
-  // Main render loop:
-  // 1) update controls -> view matrix
-  // 2) compute viewProjection and send to worker for sort updates
-  // 3) draw with latest sorted indices and splat payload
-  // 4) update HUD stats
+  /**
+   * MAIN RENDER LOOP - The Heart of 3DGS Rendering
+   * ==============================================
+   *
+   * This is called every frame (~60fps) via requestAnimationFrame.
+   * The loop performs these steps:
+   *
+   * 1. UPDATE CONTROLS
+   *    - Process keyboard/mouse input
+   *    - Apply inertia for smooth camera movement
+   *    - Update view matrix (camera pose in world space)
+   *
+   * 2. COMPUTE PROJECTION
+   *    - Build projection matrix from FOV and viewport
+   *    - Combine view * projection = viewProjection matrix
+   *    - The viewProjection transforms world coords → clip coords
+   *
+   * 3. TRIGGER SORT (if camera moved)
+   *    - Send viewProjection to worker
+   *    - Worker sorts Gaussians by depth using view direction
+   *    - Sorted indices uploaded to GPU when ready
+   *
+   * 4. RENDER
+   *    - For each Gaussian (as GPU instances):
+   *      a. Vertex shader projects center to screen
+   *      b. Computes 2D covariance via Jacobian projection
+   *      c. Extracts ellipse axes from eigenvalues
+   *      d. Expands quad corners along axes
+   *      e. Fragment shader evaluates exp(-0.5 * r²) falloff
+   *      f. Alpha blends using "one-minus-dst-alpha" mode
+   *
+   * 5. UPDATE STATS
+   *    - FPS counter
+   *    - Sort/upload/render timings
+   *
+   * The alpha blending mode is crucial:
+   *   color: srcFactor='one-minus-dst-alpha', dstFactor='one'
+   *
+   * This implements front-to-back compositing where:
+   *   dst = src * (1 - dst.a) + dst
+   *
+   * But we draw back-to-front, so we accumulate:
+   *   result = Σ (color_i * alpha_i * Π(1 - alpha_j)) for j < i
+   */
   const frame = (now: number) => {
     const dtMs = Math.max(now - lastFrame, 0.0001);
     const dtForControls = Math.min(dtMs, 34);

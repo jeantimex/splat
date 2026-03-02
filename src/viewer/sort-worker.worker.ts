@@ -1,7 +1,66 @@
 /// <reference lib="webworker" />
 
+/**
+ * =============================================================================
+ * SORT WORKER - DEPTH SORTING AND DATA PROCESSING FOR 3D GAUSSIAN SPLATTING
+ * =============================================================================
+ *
+ * This Web Worker handles CPU-intensive operations off the main thread:
+ *
+ * 1. DEPTH SORTING - Critical for Correct Rendering
+ *    ------------------------------------------------
+ *    3DGS uses alpha blending for semi-transparent Gaussians. For correct
+ *    compositing, Gaussians must be drawn in back-to-front order (painter's
+ *    algorithm). This worker computes that order every time the camera moves.
+ *
+ *    ALGORITHM: 16-bit Counting Sort (O(n) complexity)
+ *    - Compute depth = dot(viewDir, position) for each Gaussian
+ *    - Quantize depths to 16-bit integers (65536 buckets)
+ *    - Count occurrences in each bucket
+ *    - Compute prefix sums to get starting indices
+ *    - Place each Gaussian index at its sorted position
+ *
+ *    Why counting sort instead of quicksort/mergesort?
+ *    - O(n) vs O(n log n) - significant for millions of Gaussians
+ *    - Stable and predictable performance
+ *    - Cache-friendly memory access patterns
+ *    - 16-bit quantization is sufficient for visual quality
+ *
+ * 2. PLY PARSING - Convert Training Output to Runtime Format
+ *    -------------------------------------------------------
+ *    3DGS training tools output PLY files with raw Gaussian parameters.
+ *    This worker parses both standard and compressed PLY formats,
+ *    converting to our optimized runtime format.
+ *
+ *    PLY Gaussian attributes:
+ *    - x, y, z: Position in world space
+ *    - scale_0, scale_1, scale_2: Log-space scale (exp() to get actual)
+ *    - rot_0, rot_1, rot_2, rot_3: Rotation quaternion
+ *    - f_dc_0, f_dc_1, f_dc_2: DC spherical harmonic (→ RGB color)
+ *    - opacity: Logit-space opacity (sigmoid() to get [0,1])
+ *
+ * 3. COVARIANCE COMPUTATION
+ *    ----------------------
+ *    From rotation quaternion (q) and scale (s), we compute the 3D covariance:
+ *
+ *    1. Quaternion → Rotation matrix R:
+ *       R = [[1-2(qy²+qz²), 2(qxqy-qwqz), 2(qxqz+qwqy)],
+ *            [2(qxqy+qwqz), 1-2(qx²+qz²), 2(qyqz-qwqx)],
+ *            [2(qxqz-qwqy), 2(qyqz+qwqx), 1-2(qx²+qy²)]]
+ *
+ *    2. Scale → Scale matrix S = diag(sx, sy, sz)
+ *
+ *    3. Scale-rotation matrix M = R * S
+ *
+ *    4. Covariance Σ = M * M^T
+ *
+ *    The covariance defines the 3D ellipsoid shape of the Gaussian.
+ *    We store only the upper triangle (6 values) since Σ is symmetric.
+ */
+
 const ctx: DedicatedWorkerGlobalScope = self as unknown as DedicatedWorkerGlobalScope;
 
+/** Messages from main thread to worker */
 type MainToWorkerMessage =
   | { type: 'ply'; buffer: ArrayBuffer; save?: boolean }
   | { type: 'buffer'; buffer: ArrayBuffer; vertexCount: number }
@@ -26,24 +85,68 @@ interface WorkerToMainDepth {
   sortMs: number;
 }
 
-// Internal CPU-side row format used by both .splat and converted .ply:
-// position xyz (float32x3), scale xyz (float32x3), color rgba8, quaternion xyzw8.
+/**
+ * Internal CPU-side row format used by both .splat and converted .ply.
+ * 32 bytes per Gaussian:
+ *   [0-11]:  Position xyz (float32×3 = 12 bytes)
+ *   [12-23]: Scale xyz (float32×3 = 12 bytes)
+ *   [24-27]: Color RGBA (uint8×4 = 4 bytes)
+ *   [28-31]: Rotation quaternion xyzw (uint8×4 = 4 bytes, quantized [-1,1]→[0,255])
+ */
 const ROW_BYTES = 3 * 4 + 3 * 4 + 4 + 4;
 
+// =============================================================================
+// WORKER STATE
+// =============================================================================
+
+/** Raw splat data in internal 32-byte row format */
 let sourceBuffer: ArrayBuffer | null = null;
+/** Number of Gaussians in the current scene */
 let vertexCount = 0;
+/** Current viewProjection matrix (for depth calculation) */
 let viewProj: number[] = [];
+/** Previous viewProjection matrix (for change detection) */
 let lastProj: number[] = [];
+/** Previous vertex count (to detect scene changes) */
 let lastVertexCount = -1;
+/** Flag to prevent concurrent sorts */
 let sortRunning = false;
+
+/**
+ * Pre-allocated arrays for sorting (reused across frames to avoid allocation):
+ * - sizeList: Quantized depth values for each Gaussian
+ * - visibleIndices: Original indices of visible Gaussians
+ * - counts0: Bucket counts for counting sort (64K buckets for 16-bit depth)
+ * - starts0: Prefix sums giving start position of each bucket
+ */
 let sizeList = new Int32Array(0);
 let visibleIndices = new Uint32Array(0);
-const counts0 = new Uint32Array(256 * 256);
+const counts0 = new Uint32Array(256 * 256); // 64K = 2^16 buckets
 const starts0 = new Uint32Array(256 * 256);
 
+/** Shared buffer for float32 ↔ int32 bit reinterpretation */
 const floatView = new Float32Array(1);
 const int32View = new Int32Array(floatView.buffer);
 
+// =============================================================================
+// FLOAT16 PACKING FOR COVARIANCE DATA
+// =============================================================================
+
+/**
+ * Converts float32 to float16 (IEEE 754 half-precision).
+ *
+ * Float16 format: 1 sign + 5 exponent + 10 mantissa bits
+ * Range: ±65504, precision: ~0.1% relative error
+ *
+ * Used to pack 3D covariance (6 values) into 3 uint32 (6 float16).
+ * This halves memory bandwidth compared to float32, which is important
+ * when reading millions of Gaussians every frame.
+ *
+ * The precision loss is acceptable for covariance since:
+ * 1. Gaussians are smoothly varying - small errors aren't visible
+ * 2. The values are scale factors, not absolute positions
+ * 3. Anti-aliasing filter masks very small splats anyway
+ */
 function floatToHalf(float: number): number {
   // Custom float32 -> float16 conversion used to pack covariance terms.
   // This keeps GPU payload compact while preserving enough precision.
@@ -79,6 +182,38 @@ function packHalf2x16(x: number, y: number): number {
   return (floatToHalf(x) | (floatToHalf(y) << 16)) >>> 0;
 }
 
+/**
+ * PACK GAUSSIAN DATA FOR GPU UPLOAD
+ * ==================================
+ *
+ * Converts internal 32-byte row format to GPU-optimized 32-byte packed format.
+ * The key difference is that we precompute the 3D covariance matrix here,
+ * saving work in the vertex shader.
+ *
+ * INPUT (per Gaussian, 32 bytes):
+ *   position: float32×3 (12 bytes)
+ *   scale: float32×3 (12 bytes)
+ *   color: uint8×4 (4 bytes)
+ *   rotation: uint8×4 (4 bytes, quantized quaternion)
+ *
+ * OUTPUT (per Gaussian, 32 bytes = 8 uint32):
+ *   [0-2]: Position x,y,z as float32 bit patterns
+ *   [3]:   (unused)
+ *   [4-6]: Covariance upper triangle as 6 float16 packed into 3 uint32
+ *   [7]:   Color RGBA8 packed into 1 uint32
+ *
+ * COVARIANCE COMPUTATION:
+ * -----------------------
+ * The 3D covariance matrix Σ defines the ellipsoid shape of each Gaussian.
+ * It's computed from rotation quaternion q and scale vector s:
+ *
+ *   1. Convert quaternion to rotation matrix R (3×3)
+ *   2. Create scale matrix S = diag(s.x, s.y, s.z)
+ *   3. Compute M = R × S (scale-rotation matrix)
+ *   4. Compute Σ = M × Mᵀ (covariance)
+ *
+ * Since Σ is symmetric, we only store 6 values: [σxx, σxy, σxz, σyy, σyz, σzz]
+ */
 function postSplatPayload() {
   if (!sourceBuffer || vertexCount <= 0) return;
   const fBuffer = new Float32Array(sourceBuffer);
@@ -88,54 +223,84 @@ function postSplatPayload() {
 
   for (let i = 0; i < vertexCount; i++) {
     // Copy center position bit-pattern directly; vertex shader bitcasts back to f32.
-    packed[8 * i + 0] = int32ViewFromFloat(fBuffer[8 * i + 0]);
-    packed[8 * i + 1] = int32ViewFromFloat(fBuffer[8 * i + 1]);
-    packed[8 * i + 2] = int32ViewFromFloat(fBuffer[8 * i + 2]);
+    // Using bitcast preserves exact float values without conversion overhead.
+    packed[8 * i + 0] = int32ViewFromFloat(fBuffer[8 * i + 0]); // x
+    packed[8 * i + 1] = int32ViewFromFloat(fBuffer[8 * i + 1]); // y
+    packed[8 * i + 2] = int32ViewFromFloat(fBuffer[8 * i + 2]); // z
 
-    packedBytes[4 * (8 * i + 7) + 0] = uBuffer[32 * i + 24 + 0];
-    packedBytes[4 * (8 * i + 7) + 1] = uBuffer[32 * i + 24 + 1];
-    packedBytes[4 * (8 * i + 7) + 2] = uBuffer[32 * i + 24 + 2];
-    packedBytes[4 * (8 * i + 7) + 3] = uBuffer[32 * i + 24 + 3];
+    // Copy RGBA8 color (bytes 24-27 of input)
+    packedBytes[4 * (8 * i + 7) + 0] = uBuffer[32 * i + 24 + 0]; // R
+    packedBytes[4 * (8 * i + 7) + 1] = uBuffer[32 * i + 24 + 1]; // G
+    packedBytes[4 * (8 * i + 7) + 2] = uBuffer[32 * i + 24 + 2]; // B
+    packedBytes[4 * (8 * i + 7) + 3] = uBuffer[32 * i + 24 + 3]; // A
 
+    // Extract scale (float32×3)
     const scale = [fBuffer[8 * i + 3], fBuffer[8 * i + 4], fBuffer[8 * i + 5]];
+
+    // Dequantize rotation quaternion from uint8 [0,255] to float [-1,1]
+    // The quaternion is stored as (w, x, y, z) but we use index 0 as w here
     const rot = [
-      (uBuffer[32 * i + 28 + 0] - 128) / 128,
-      (uBuffer[32 * i + 28 + 1] - 128) / 128,
-      (uBuffer[32 * i + 28 + 2] - 128) / 128,
-      (uBuffer[32 * i + 28 + 3] - 128) / 128,
+      (uBuffer[32 * i + 28 + 0] - 128) / 128, // qw
+      (uBuffer[32 * i + 28 + 1] - 128) / 128, // qx
+      (uBuffer[32 * i + 28 + 2] - 128) / 128, // qy
+      (uBuffer[32 * i + 28 + 3] - 128) / 128, // qz
     ];
 
-    // Build scale-rot matrix from quantized quaternion + scale.
+    /**
+     * Build the scale-rotation matrix M = R × S.
+     *
+     * Quaternion to rotation matrix formula:
+     *   R = [[1-2(qy²+qz²), 2(qxqy-qwqz), 2(qxqz+qwqy)],
+     *        [2(qxqy+qwqz), 1-2(qx²+qz²), 2(qyqz-qwqx)],
+     *        [2(qxqz-qwqy), 2(qyqz+qwqx), 1-2(qx²+qy²)]]
+     *
+     * We multiply each row by the corresponding scale component
+     * to combine R and S in one step.
+     */
     const m = [
+      // First row of R, scaled by scale[0]
       1.0 - 2.0 * (rot[2] * rot[2] + rot[3] * rot[3]),
       2.0 * (rot[1] * rot[2] + rot[0] * rot[3]),
       2.0 * (rot[1] * rot[3] - rot[0] * rot[2]),
 
+      // Second row of R, scaled by scale[1]
       2.0 * (rot[1] * rot[2] - rot[0] * rot[3]),
       1.0 - 2.0 * (rot[1] * rot[1] + rot[3] * rot[3]),
       2.0 * (rot[2] * rot[3] + rot[0] * rot[1]),
 
+      // Third row of R, scaled by scale[2]
       2.0 * (rot[1] * rot[3] + rot[0] * rot[2]),
       2.0 * (rot[2] * rot[3] - rot[0] * rot[1]),
       1.0 - 2.0 * (rot[1] * rot[1] + rot[2] * rot[2]),
     ].map((value, idx) => value * scale[Math.floor(idx / 3)]);
 
-    // Upper triangle of covariance in world space.
+    /**
+     * Compute 3D covariance Σ = M × Mᵀ.
+     *
+     * Since Σ is symmetric (Σᵢⱼ = Σⱼᵢ), we only compute and store
+     * the upper triangle: σxx, σxy, σxz, σyy, σyz, σzz
+     *
+     * Each element: σᵢⱼ = Σₖ M[i][k] × M[j][k]
+     *
+     * The 4× multiplier is a convention that simplifies the shader math.
+     */
     const sigma = [
-      m[0] * m[0] + m[3] * m[3] + m[6] * m[6],
-      m[0] * m[1] + m[3] * m[4] + m[6] * m[7],
-      m[0] * m[2] + m[3] * m[5] + m[6] * m[8],
-      m[1] * m[1] + m[4] * m[4] + m[7] * m[7],
-      m[1] * m[2] + m[4] * m[5] + m[7] * m[8],
-      m[2] * m[2] + m[5] * m[5] + m[8] * m[8],
+      m[0] * m[0] + m[3] * m[3] + m[6] * m[6], // σxx
+      m[0] * m[1] + m[3] * m[4] + m[6] * m[7], // σxy
+      m[0] * m[2] + m[3] * m[5] + m[6] * m[8], // σxz
+      m[1] * m[1] + m[4] * m[4] + m[7] * m[7], // σyy
+      m[1] * m[2] + m[4] * m[5] + m[7] * m[8], // σyz
+      m[2] * m[2] + m[5] * m[5] + m[8] * m[8], // σzz
     ];
 
-    packed[8 * i + 4] = packHalf2x16(4 * sigma[0], 4 * sigma[1]);
-    packed[8 * i + 5] = packHalf2x16(4 * sigma[2], 4 * sigma[3]);
-    packed[8 * i + 6] = packHalf2x16(4 * sigma[4], 4 * sigma[5]);
+    // Pack 6 float16 covariance values into 3 uint32
+    packed[8 * i + 4] = packHalf2x16(4 * sigma[0], 4 * sigma[1]); // σxx, σxy
+    packed[8 * i + 5] = packHalf2x16(4 * sigma[2], 4 * sigma[3]); // σxz, σyy
+    packed[8 * i + 6] = packHalf2x16(4 * sigma[4], 4 * sigma[5]); // σyz, σzz
   }
 
   // Transfer ownership of packed buffer to main thread (zero-copy semantics).
+  // After this, 'packed' is no longer usable in this worker.
   const msg: WorkerToMainSplat = {
     type: 'splat',
     splatData: packed.buffer,
@@ -149,32 +314,106 @@ function int32ViewFromFloat(value: number): number {
   return int32View[0] >>> 0;
 }
 
+/**
+ * DEPTH SORTING - Core Algorithm for Back-to-Front Rendering
+ * ===========================================================
+ *
+ * This function sorts all Gaussians by depth (distance from camera) so they
+ * can be rendered in back-to-front order for correct alpha blending.
+ *
+ * WHY SORTING IS NECESSARY:
+ * -------------------------
+ * 3DGS Gaussians are semi-transparent. The alpha blending equation is:
+ *   C_final = Σᵢ (Cᵢ × αᵢ × ∏ⱼ<ᵢ(1 - αⱼ))
+ *
+ * This is order-dependent! Drawing Gaussian A then B gives different
+ * results than drawing B then A. Correct compositing requires back-to-front.
+ *
+ * DEPTH CALCULATION:
+ * ------------------
+ * For each Gaussian position p = (x, y, z), we compute:
+ *   depth = viewDir · p = proj[2]*x + proj[6]*y + proj[10]*z
+ *
+ * The viewProjection matrix columns contain the camera axes:
+ *   proj[2,6,10] = forward direction (Z axis in camera space)
+ *
+ * This gives the signed distance along the view direction.
+ * Larger depth = farther from camera = should be drawn first.
+ *
+ * SORTING ALGORITHM: 16-bit Counting Sort
+ * ---------------------------------------
+ * We use counting sort instead of comparison-based sorts because:
+ * 1. O(n) time complexity vs O(n log n) for quicksort/mergesort
+ * 2. For millions of Gaussians, this is significantly faster
+ * 3. Stable sort (preserves order of equal-depth Gaussians)
+ *
+ * Steps:
+ * 1. Compute depth for each Gaussian
+ * 2. Find min/max depth range
+ * 3. Quantize depths to 16-bit integers (64K buckets)
+ * 4. Count occurrences in each bucket
+ * 5. Compute prefix sum to get bucket starting positions
+ * 6. Place each Gaussian index at its sorted position
+ *
+ * EARLY EXIT OPTIMIZATION:
+ * ------------------------
+ * We skip re-sorting if the camera hasn't moved significantly:
+ * - View direction change < ~1 degree (dot product > 0.99)
+ * - Position change < 0.01 units
+ *
+ * @param proj - ViewProjection matrix (16 floats, column-major)
+ */
 function runSort(proj: number[]) {
   if (!sourceBuffer || vertexCount <= 0 || proj.length < 16) return;
   const sortStart = performance.now();
   const fBuffer = new Float32Array(sourceBuffer);
 
+  /**
+   * Early exit if camera hasn't moved significantly.
+   *
+   * We check:
+   * 1. View direction: dot product of old and new forward vectors
+   *    dot ≈ 1 means same direction (cos(0°) = 1)
+   * 2. Position: squared distance between camera positions
+   *
+   * This optimization saves significant CPU time during static views.
+   */
   if (lastVertexCount === vertexCount) {
+    // Compare view directions using dot product of forward vectors
     const dot = lastProj[2] * proj[2] + lastProj[6] * proj[6] + lastProj[10] * proj[10];
     if (Math.abs(dot - 1) < 0.01) {
+      // Check if camera position changed
       const distSq =
         (lastProj[12] - proj[12]) ** 2 +
         (lastProj[13] - proj[13]) ** 2 +
         (lastProj[14] - proj[14]) ** 2;
-      if (distSq < 0.0001) return;
+      if (distSq < 0.0001) return; // Skip sort - camera didn't move enough
     }
   } else {
+    // Scene changed - need to recompute and upload splat data
     postSplatPayload();
     lastVertexCount = vertexCount;
   }
 
+  // Initialize depth range tracking
   let maxDepth = -Infinity;
   let minDepth = Infinity;
+
+  // Grow work arrays if needed (reuse to avoid allocation)
   if (sizeList.length < vertexCount) {
     sizeList = new Int32Array(vertexCount);
     visibleIndices = new Uint32Array(vertexCount);
   }
 
+  /**
+   * PASS 1: Compute depths and find range
+   *
+   * Depth is computed as dot product of view direction with position.
+   * The view direction is extracted from viewProjection matrix:
+   *   forward = (proj[2], proj[6], proj[10])
+   *
+   * We multiply by 4096 for integer quantization precision.
+   */
   for (let i = 0; i < vertexCount; i++) {
     const x = fBuffer[8 * i + 0];
     const y = fBuffer[8 * i + 1];
@@ -182,6 +421,7 @@ function runSort(proj: number[]) {
 
     visibleIndices[i] = i;
 
+    // Depth = dot(viewDir, position), scaled for integer precision
     const depth = ((proj[2] * x + proj[6] * y + proj[10] * z) * 4096) | 0;
     sizeList[i] = depth;
     if (depth > maxDepth) maxDepth = depth;
@@ -200,26 +440,52 @@ function runSort(proj: number[]) {
     return;
   }
 
-  // 16-bit counting sort:
+  /**
+   * PASS 2: Counting Sort (16-bit buckets)
+   *
+   * Step 1: Normalize depths to [0, 65535] range
+   * Step 2: Count occurrences in each of 64K buckets
+   */
   const depthInv = (256 * 256 - 1) / (maxDepth - minDepth || 1);
-  counts0.fill(0);
+  counts0.fill(0); // Reset bucket counts
+
   for (let i = 0; i < renderCount; i++) {
+    // Normalize depth to 16-bit range
     sizeList[i] = ((sizeList[i] - minDepth) * depthInv) | 0;
+    // Increment bucket count
     counts0[sizeList[i]]++;
   }
 
+  /**
+   * PASS 3: Compute prefix sums (cumulative counts)
+   *
+   * After this, starts0[i] = number of elements with depth < i
+   * This tells us where each bucket starts in the output array.
+   */
   starts0[0] = 0;
   for (let i = 1; i < 256 * 256; i++) {
     starts0[i] = starts0[i - 1] + counts0[i - 1];
   }
 
+  /**
+   * PASS 4: Place elements in sorted order
+   *
+   * For each Gaussian, place its index at the position given by starts0.
+   * Increment starts0 after each placement to handle duplicates.
+   *
+   * Result: depthIndex[0..n-1] contains Gaussian indices in
+   * back-to-front order (smallest depth first = farthest = draw first).
+   */
   const depthIndex = new Uint32Array(renderCount);
   for (let i = 0; i < renderCount; i++) {
     const originalIdx = visibleIndices[i];
     depthIndex[starts0[sizeList[i]]++] = originalIdx;
   }
 
+  // Remember this projection for early exit check next frame
   lastProj = proj.slice();
+
+  // Send sorted indices to main thread (zero-copy transfer)
   const msg: WorkerToMainDepth = {
     type: 'depth',
     depthIndex: depthIndex.buffer,

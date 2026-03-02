@@ -1,28 +1,144 @@
+/**
+ * =============================================================================
+ * WEBGPU RENDERER FOR 3D GAUSSIAN SPLATTING
+ * =============================================================================
+ *
+ * This module implements the GPU rendering pipeline for 3D Gaussian Splatting
+ * using WebGPU. It handles:
+ *
+ * 1. GPU RESOURCE MANAGEMENT
+ *    - Storage buffers for Gaussian data and sorted indices
+ *    - Uniform buffers for camera matrices and render parameters
+ *    - Off-screen textures for stereo rendering and crossfade effects
+ *
+ * 2. RENDER PIPELINE SETUP
+ *    - Vertex shader: Projects Gaussians to screen-space ellipses
+ *    - Fragment shader: Evaluates Gaussian falloff and applies color grading
+ *    - Alpha blending: Configured for correct transparent composition
+ *
+ * 3. INSTANCED RENDERING
+ *    - Each Gaussian is rendered as one "instance" of a quad
+ *    - Single draw call renders all Gaussians (millions of instances)
+ *    - GPU parallelism makes this extremely efficient
+ *
+ * RENDERING TECHNIQUE:
+ * --------------------
+ * The key insight of 3DGS is that a 3D Gaussian projects to a 2D Gaussian.
+ * Given a 3D Gaussian with covariance Σ₃ₓ₃ and a camera projection, we can
+ * compute the 2D covariance Σ₂ₓ₂ analytically using the Jacobian of the
+ * projection transform.
+ *
+ * The 2D covariance defines an ellipse. We render this as a screen-aligned
+ * quad, with vertices positioned along the ellipse's principal axes.
+ * The fragment shader then evaluates the Gaussian function:
+ *
+ *   G(x) = exp(-0.5 * x^T * Σ⁻¹ * x)
+ *
+ * For a 2D Gaussian centered at origin with principal axes aligned to x,y,
+ * this simplifies to: G(r) = exp(-0.5 * (x²/σx² + y²/σy²))
+ *
+ * ALPHA BLENDING:
+ * ---------------
+ * We use "one-minus-dst-alpha" blending for front-to-back compositing:
+ *   dst.rgb = src.rgb * (1 - dst.a) + dst.rgb
+ *   dst.a = src.a * (1 - dst.a) + dst.a
+ *
+ * Combined with back-to-front sorted draw order, this produces:
+ *   final = Σᵢ (colorᵢ * αᵢ * ∏ⱼ<ᵢ(1 - αⱼ))
+ *
+ * This is the standard over operator for alpha compositing.
+ */
+
 import type { Mat4 } from './camera';
 import vertexShaderSource from './shaders/splat.vert.wgsl?raw';
 import fragmentShaderSource from './shaders/splat.frag.wgsl?raw';
 import anaglyphCompositeShaderSource from './shaders/anaglyph-composite.wgsl?raw';
 import crossfadeCompositeShaderSource from './shaders/crossfade-composite.wgsl?raw';
 
-// 2x mat4 + focal vec2 + viewport vec2 + render params vec4 + color params (3x vec4).
-// See WGSL Uniforms struct for exact layout.
+/**
+ * Size of the uniform buffer in 32-bit floats.
+ * Layout: 2x mat4 + focal vec2 + viewport vec2 + render params vec4 + color params (3x vec4)
+ * Total: 32 + 32 + 8 + 8 + 16 + 48 = 144 bytes = 36 floats... wait, let's recalculate:
+ * - projection: mat4x4 = 16 floats
+ * - view: mat4x4 = 16 floats
+ * - focal: vec2 = 2 floats
+ * - viewport: vec2 = 2 floats
+ * - render_params: vec4 = 4 floats
+ * - color_basic: vec4 = 4 floats
+ * - color_levels: vec4 = 4 floats
+ * - color_mix: vec4 = 4 floats
+ * Total = 52 floats = 208 bytes
+ */
 const UNIFORM_FLOATS = 52;
 const UNIFORM_BYTES = UNIFORM_FLOATS * 4;
 
+/**
+ * Per-frame rendering state passed to the renderer.
+ *
+ * This structure contains all information needed to render one frame:
+ * - Camera transforms (view, projection matrices)
+ * - Visual parameters (splat scale, color grading)
+ * - Stereo mode settings for VR/3D rendering
+ */
 export interface RenderState {
+  /**
+   * Projection matrix: transforms camera-space → clip-space (NDC).
+   * Defines the camera frustum (FOV, aspect ratio, near/far planes).
+   * For 3DGS, we use focal length parameters from training camera.
+   */
   projection: Mat4;
+
+  /**
+   * View matrix: transforms world-space → camera-space.
+   * Represents the camera pose (position + orientation) in the scene.
+   * Updated every frame based on user input.
+   */
   view: Mat4;
+
+  /** View matrix for left eye (stereo rendering) */
   viewLeft: Mat4;
+
+  /** View matrix for right eye (stereo rendering) */
   viewRight: Mat4;
+
+  /**
+   * Focal lengths (fx, fy) in pixels.
+   * These come from the camera intrinsics used during Gaussian training.
+   * Used in the Jacobian calculation for projecting 3D covariance to 2D.
+   */
   focal: [number, number];
-  // Logical display size in physical pixels (independent from internal render scale).
+
+  /** Logical display size in physical pixels (independent from internal render scale) */
   viewport: [number, number];
-  // 0 = full splat, 1 = full point cloud; values in between crossfade both layers.
+
+  /**
+   * Crossfade value between splat and point cloud modes.
+   * 0 = full splat (Gaussian ellipses), 1 = full point cloud (simple dots).
+   * Values in between blend both rendering modes for smooth transitions.
+   */
   transition: number;
+
+  /** Point size in pixels (for point cloud mode) */
   pointSize: number;
+
+  /**
+   * Scale multiplier for Gaussian ellipses.
+   * Values < 1 make splats smaller (more sparse), > 1 makes them larger (more overlap).
+   * Useful for artistic control or debugging.
+   */
   splatScale: number;
+
+  /**
+   * Anti-aliasing filter strength.
+   * Added to the diagonal of the 2D covariance matrix to prevent aliasing
+   * when Gaussians project to sub-pixel sizes. Higher values = more blur.
+   */
   antialias: number;
+
+  /** Stereo rendering mode: off, red/cyan anaglyph, or side-by-side */
   stereoMode: 'off' | 'anaglyph' | 'sbs';
+
+  // Color grading parameters (applied in fragment shader)
   brightness: number;
   contrast: number;
   gamma: number;
@@ -44,12 +160,57 @@ export interface WebGPURenderer {
   consumeTimings: () => { uploadMs: number; renderMs: number };
 }
 
+/**
+ * Creates and initializes the WebGPU rendering context for 3D Gaussian Splatting.
+ *
+ * GPU BUFFER ORGANIZATION:
+ * ------------------------
+ * 1. SPLAT BUFFER (Storage, read-only in shader)
+ *    - Contains packed Gaussian data: position, covariance, color
+ *    - 8 uint32 (32 bytes) per Gaussian
+ *    - Accessed by vertex shader via instance_index → sorted_indices → splat data
+ *
+ * 2. SORTED INDEX BUFFER (Storage, read-only in shader)
+ *    - Maps instance_index to original Gaussian index
+ *    - Updated each frame with back-to-front sorted order
+ *    - Critical for correct alpha blending
+ *
+ * 3. UNIFORM BUFFER (Uniform, updated each frame)
+ *    - Camera matrices (projection, view)
+ *    - Focal lengths and viewport size
+ *    - Render parameters (mode, scale, color grading)
+ *
+ * 4. QUAD VERTEX BUFFER (Vertex)
+ *    - Just 4 vertices defining a unit quad
+ *    - Shared by all instances; shader scales per-instance
+ *
+ * RENDERING ARCHITECTURE:
+ * -----------------------
+ * Uses instanced rendering where each Gaussian is one instance of the quad.
+ * The vertex shader:
+ *   1. Looks up sorted index to get actual Gaussian data
+ *   2. Projects Gaussian center to screen space
+ *   3. Computes 2D covariance from 3D covariance
+ *   4. Finds ellipse axes from eigendecomposition
+ *   5. Positions quad vertex along major/minor axis
+ *
+ * The fragment shader:
+ *   1. Evaluates exp(-0.5 * r²) at fragment position
+ *   2. Applies color grading
+ *   3. Outputs premultiplied alpha color
+ *
+ * @param canvas - The HTML canvas element to render to
+ * @returns WebGPURenderer interface for controlling rendering
+ */
 export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<WebGPURenderer> {
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error('No compatible GPU adapter found');
 
-  // Request adapter-reported limits explicitly so large scenes can bind
-  // storage buffers above the default (often 128MB).
+  /**
+   * Request adapter-reported limits explicitly so large scenes can bind
+   * storage buffers above the default (often 128MB).
+   * 3DGS scenes can have millions of Gaussians, requiring large buffers.
+   */
   const device = await adapter.requestDevice({
     requiredLimits: {
       maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
@@ -61,7 +222,11 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
 
   const format = navigator.gpu.getPreferredCanvasFormat();
 
-  // Single uniform buffer updated every frame.
+  /**
+   * Multiple uniform buffers are needed for stereo rendering.
+   * Each eye/mode combination needs its own uniform buffer because
+   * they're rendered in separate passes with different matrices.
+   */
   const makeUniformBuffer = (label: string) =>
     device.createBuffer({
       label,
@@ -74,8 +239,20 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
   const uniformBufferC = makeUniformBuffer('viewer uniforms C');
   const uniformBufferD = makeUniformBuffer('viewer uniforms D');
 
-  // We render every splat as an instanced screen-space quad.
-  // The vertex shader expands this quad into ellipse axes per instance.
+  /**
+   * QUAD GEOMETRY FOR INSTANCED SPLATTING
+   * -------------------------------------
+   * We render every Gaussian as an instanced screen-space quad.
+   * The quad is a simple 4-vertex triangle strip covering [-2, 2] in local coords.
+   *
+   * Why [-2, 2] instead of [-1, 1]?
+   * The Gaussian exp(-0.5 * r²) falls to exp(-2) ≈ 0.135 at r=2.
+   * Using r=2 captures ~95% of the Gaussian's visible contribution.
+   * This balances fill rate (smaller quads) vs quality (capturing the tails).
+   *
+   * The vertex shader scales and positions this quad per-instance based on
+   * the projected 2D covariance ellipse of each Gaussian.
+   */
   const quadVertices = new Float32Array([-2, -2, 2, -2, -2, 2, 2, 2]);
   const quadVertexBuffer = device.createBuffer({
     label: 'quad vertices',
@@ -84,13 +261,37 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
   });
   device.queue.writeBuffer(quadVertexBuffer, 0, quadVertices);
 
+  /** Current allocated capacity for splat data (in uint32 elements) */
   let splatCapacity = 8;
+  /** Current allocated capacity for sorted indices (in uint32 elements) */
   let indexCapacity = 4;
+  /** Number of Gaussians to render (= number of instances in draw call) */
   let instanceCount = 0;
 
-  // Storage buffers:
-  // - splatBuffer: packed per-splat payload (8 u32 per splat)
-  // - sortedIndexBuffer: depth-sorted instance ids
+  /**
+   * GPU STORAGE BUFFERS FOR GAUSSIAN DATA
+   * -------------------------------------
+   * These are the primary data structures for 3DGS rendering:
+   *
+   * SPLAT BUFFER:
+   * Contains packed Gaussian parameters, 8 uint32 (32 bytes) per Gaussian:
+   *   [0-2]: Position (x, y, z) as float32 bit patterns
+   *   [3]:   Unused/padding
+   *   [4-6]: Covariance upper triangle (6 float16 packed into 3 uint32)
+   *   [7]:   Color RGBA8 packed into one uint32
+   *
+   * The covariance is stored as the upper triangle of the 3×3 symmetric matrix:
+   *   | σxx  σxy  σxz |
+   *   | σxy  σyy  σyz |  → stored as [σxx, σxy, σxz, σyy, σyz, σzz]
+   *   | σxz  σyz  σzz |
+   *
+   * SORTED INDEX BUFFER:
+   * Maps GPU instance_index to original Gaussian index in back-to-front order.
+   * Updated every frame (or when camera moves significantly) by the sort worker.
+   *
+   * This indirection allows us to reorder rendering without moving the actual
+   * Gaussian data, which would be expensive for millions of Gaussians.
+   */
   let splatBuffer = device.createBuffer({
     label: 'splat buffer',
     size: splatCapacity * 4,
@@ -138,6 +339,45 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
   let bindGroupC = createBindGroup(uniformBufferC);
   let bindGroupD = createBindGroup(uniformBufferD);
 
+  /**
+   * CREATE RENDER PIPELINE FOR GAUSSIAN SPLATTING
+   * ----------------------------------------------
+   *
+   * VERTEX SHADER (splat.vert.wgsl):
+   * - Receives quad corner position + instance_index
+   * - Looks up Gaussian data via sorted_indices[instance_index]
+   * - Projects 3D Gaussian center to 2D screen position
+   * - Computes 2D covariance via Jacobian projection (explained in shader)
+   * - Extracts ellipse axes from eigenvalues of 2D covariance
+   * - Positions quad vertex along major/minor axis
+   *
+   * FRAGMENT SHADER (splat.frag.wgsl):
+   * - Receives interpolated local quad position
+   * - Evaluates Gaussian: exp(-0.5 * dot(pos, pos))
+   * - Applies color grading transforms
+   * - Outputs premultiplied alpha color
+   *
+   * ALPHA BLENDING CONFIGURATION:
+   * -----------------------------
+   * This is critical for correct transparent rendering!
+   *
+   * We use "one-minus-dst-alpha" blending, also known as "under" compositing:
+   *   new_dst.rgb = src.rgb * (1 - dst.a) + dst.rgb * 1
+   *   new_dst.a   = src.a * (1 - dst.a) + dst.a * 1
+   *
+   * With back-to-front sorted rendering:
+   * - Start with dst = (0, 0, 0, 0) - transparent background
+   * - Draw farthest Gaussian first: dst = src * (1 - 0) = src
+   * - Each subsequent Gaussian blends on top of existing content
+   *
+   * Final color = Σᵢ (colorᵢ × αᵢ × ∏ⱼ<ᵢ(1 - αⱼ))
+   *
+   * The fragment shader outputs PREMULTIPLIED ALPHA:
+   *   output.rgb = color * alpha
+   *   output.a = alpha
+   *
+   * This is required because the blend factors expect premultiplied values.
+   */
   const createPipeline = (writeMask: GPUColorWriteFlags = GPUColorWrite.ALL) =>
     device.createRenderPipeline({
       layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
@@ -146,7 +386,7 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
         entryPoint: 'vs_main',
         buffers: [
           {
-            arrayStride: 8,
+            arrayStride: 8, // 2 floats × 4 bytes = 8 bytes per vertex
             stepMode: 'vertex',
             attributes: [{ shaderLocation: 0, format: 'float32x2', offset: 0 }],
           },
@@ -158,6 +398,11 @@ export async function createWebGPURenderer(canvas: HTMLCanvasElement): Promise<W
         targets: [
           {
             format,
+            /**
+             * Alpha blending for transparent Gaussians.
+             * Using "one-minus-dst-alpha" implements the "under" operator
+             * which, combined with back-to-front sorting, gives correct compositing.
+             */
             blend: {
               color: {
                 srcFactor: 'one-minus-dst-alpha',
