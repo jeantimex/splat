@@ -36,114 +36,36 @@
  */
 
 import './style.css';
-import GUI from 'lil-gui';
-import { createControls } from './viewer/controls';
-import { createWebGPURenderer } from './viewer/renderer-webgpu';
+import type GUI from 'lil-gui';
+
+// Viewer modules
 import {
   DEFAULT_CAMERAS,
   getProjectionMatrix,
   getViewMatrix,
   invert4,
   multiply4,
-  translate4,
   type CameraPose,
   type Mat4,
 } from './viewer/camera';
+import { centerCamera, getEyeViewMatrix } from './viewer/camera-utils';
+import { createControls } from './viewer/controls';
+import { getViewerDom, setupStereoButtons } from './viewer/dom';
+import { createGui, type GuiCallbacks } from './viewer/gui';
+import { registerDragDrop, registerKeyboardShortcuts } from './viewer/input';
 import { SPLAT_ROW_BYTES } from './viewer/loader';
+import { createWebGPURenderer } from './viewer/renderer-webgpu';
 import { createSortWorker } from './viewer/sort-worker';
+import { DEFAULT_RENDER_OPTIONS, type RenderOptions } from './viewer/types';
+import {
+  decodeViewMatrix,
+  downloadBinary,
+  encodeViewMatrix,
+  isPlyBuffer,
+  normalizeIndex,
+} from './viewer/utils';
 
-/**
- * ASCII bytes for the text "ply\n" (112='p', 108='l', 121='y', 10='\n').
- * PLY (Polygon File Format) is a common format for 3D Gaussian Splatting data.
- * We use this magic number to quickly identify PLY files vs raw .splat files.
- */
-const PLY_MAGIC = [112, 108, 121, 10];
-
-/** DOM element references for the viewer UI */
-interface ViewerDom {
-  canvas: HTMLCanvasElement;
-  message: HTMLDivElement;
-  fps: HTMLSpanElement;
-  progress: HTMLDivElement;
-  dropzone: HTMLDivElement;
-  anaglyphButton: HTMLButtonElement;
-  stereoButton: HTMLButtonElement;
-}
-
-/**
- * Runtime rendering options that affect how Gaussians are displayed.
- *
- * These parameters control the visual appearance and can be adjusted in real-time:
- * - pointCloud: Toggle between Gaussian splatting and simple point cloud rendering
- * - splatScale: Scale factor for Gaussian ellipse size (affects visual density)
- * - antialias: Low-pass filter strength to reduce aliasing on small splats
- *
- * The color grading options (brightness, contrast, gamma, etc.) are applied
- * in the fragment shader after computing the Gaussian contribution.
- */
-interface RenderOptions {
-  /** When true, render as simple points instead of Gaussian ellipses */
-  pointCloud: boolean;
-  /** Size of points in point cloud mode (in pixels) */
-  pointSize: number;
-  /** Stereo rendering mode for VR/3D viewing */
-  stereoMode: 'off' | 'anaglyph' | 'sbs';
-  /** Vertical field of view in degrees */
-  fov: number;
-  /** Multiplier for Gaussian ellipse size (1.0 = original size from training) */
-  splatScale: number;
-  /** Anti-aliasing filter strength added to 2D covariance diagonal */
-  antialias: number;
-  /** Additive brightness adjustment (-1 to 1) */
-  brightness: number;
-  /** Multiplicative contrast (0 = gray, 1 = normal, >1 = enhanced) */
-  contrast: number;
-  /** Gamma correction exponent (1.0 = linear) */
-  gamma: number;
-  /** Shadow lift/crush control */
-  blackLevel: number;
-  /** Highlight lift/crush control */
-  whiteLevel: number;
-  /** Overall intensity multiplier */
-  intensity: number;
-  /** Color saturation (0 = grayscale, 1 = normal) */
-  saturate: number;
-  /** Vibrance (selective saturation for less saturated colors) */
-  vibrance: number;
-  /** Color temperature shift (negative = cooler, positive = warmer) */
-  temperature: number;
-  /** Green/magenta tint shift */
-  tint: number;
-  /** Global alpha multiplier for all Gaussians */
-  alpha: number;
-  /** Enable smooth camera transitions between preset positions */
-  animateCamera: boolean;
-  /** Duration of camera transition animation in milliseconds */
-  animationDuration: number;
-}
-
-const DEFAULT_RENDER_OPTIONS: RenderOptions = {
-  pointCloud: false,
-  pointSize: 0.8,
-  stereoMode: 'off',
-  fov: 75,
-  splatScale: 1,
-  antialias: 0.3,
-  brightness: 0,
-  contrast: 1,
-  gamma: 1,
-  blackLevel: 0,
-  whiteLevel: 0,
-  intensity: 1,
-  saturate: 1,
-  vibrance: 0,
-  temperature: 0,
-  tint: 0,
-  alpha: 1,
-  animateCamera: true,
-  animationDuration: 1350,
-};
-
+// Initialize DOM references
 const dom = getViewerDom();
 
 /**
@@ -176,27 +98,28 @@ async function main() {
     return;
   }
 
-  /**
-   * Core subsystems:
-   * - renderer: WebGPU resources + draw calls (handles GPU buffer management)
-   * - controls: input -> view matrix updates (orbit/pan/zoom camera)
-   * - GUI: runtime toggles for visual parameters
-   *
-   * The renderer uses instanced drawing where each Gaussian is one instance.
-   * A single quad (4 vertices) is expanded per-instance based on the
-   * Gaussian's projected 2D covariance ellipse.
-   */
+  // ==========================================================================
+  // INITIALIZE CORE SUBSYSTEMS
+  // ==========================================================================
+
   const renderer = await createWebGPURenderer(dom.canvas);
   const controls = createControls(dom.canvas);
-  const renderOptions = { ...DEFAULT_RENDER_OPTIONS };
+  const renderOptions: RenderOptions = { ...DEFAULT_RENDER_OPTIONS };
   let cameras: CameraPose[] = [...DEFAULT_CAMERAS];
   let currentCameraIndex = 0;
 
+  // Camera animation state
   let targetViewMatrix: Mat4 | null = null;
   let animationStartTime = 0;
 
-  // Applies one camera preset (intrinsics + pose) to the live controls.
-  // We also stop carousel mode so preset selection is deterministic.
+  // ==========================================================================
+  // CAMERA PRESET MANAGEMENT
+  // ==========================================================================
+
+  /**
+   * Applies a camera preset (intrinsics + pose) to the live controls.
+   * Optionally animates the transition for smooth camera movement.
+   */
   const applyCamera = (index: number) => {
     if (!cameras.length) return;
     currentCameraIndex = normalizeIndex(index, cameras.length);
@@ -216,16 +139,22 @@ async function main() {
     controls.setCarousel(false);
   };
 
-  const cameraState = {
-    selectedCamera: '',
-  };
-  let cameraDropdown: any = null;
+  // Camera dropdown state
+  const cameraState = { selectedCamera: '' };
+  let cameraDropdown: ReturnType<GUI['add']> | null = null;
 
-  const updateCameraDropdown = (cameras: CameraPose[], cameraGui: any, callbacks: any) => {
+  /**
+   * Updates the camera dropdown in the GUI with new camera list.
+   */
+  const updateCameraDropdown = (
+    newCameras: CameraPose[],
+    cameraGui: GUI,
+    callbacks: GuiCallbacks,
+  ) => {
     if (cameraDropdown) {
       cameraDropdown.destroy();
     }
-    const cameraNames = cameras.map((c, i) => `${i + 1}: ${c.img_name}`);
+    const cameraNames = newCameras.map((c, i) => `${i + 1}: ${c.img_name}`);
     cameraState.selectedCamera = cameraNames[0] || '';
     cameraDropdown = cameraGui
       .add(cameraState, 'selectedCamera', cameraNames)
@@ -233,13 +162,17 @@ async function main() {
       .onChange((displayName: string) => {
         const indexStr = displayName.split(':')[0];
         const index = Number.parseInt(indexStr, 10) - 1;
-        if (index >= 0 && index < cameras.length) {
+        if (index >= 0 && index < newCameras.length) {
           callbacks.onApplyCamera(index);
         }
       });
   };
 
-  const gui = createGui(renderOptions, {
+  // ==========================================================================
+  // GUI SETUP
+  // ==========================================================================
+
+  const guiCallbacks: GuiCallbacks = {
     onCamerasLoaded: (newCameras, cameraGui, callbacks) => {
       cameras = newCameras;
       updateCameraDropdown(newCameras, cameraGui, callbacks);
@@ -271,14 +204,18 @@ async function main() {
       gui.controllersRecursive().forEach((c) => c.updateDisplay());
       updateStereoUi();
     },
-  });
-  const updateStereoUi = setupStereoButtons(dom, renderOptions);
+  };
 
+  const gui = createGui(renderOptions, guiCallbacks, dom);
+  const updateStereoUi = setupStereoButtons(dom, renderOptions);
   const cameraGui = gui.folders.find((f) => f._title === 'Camera');
 
+  // ==========================================================================
+  // RENDER STATE
+  // ==========================================================================
+
   let loadedVertices = 0;
-  // Animated crossfade value: 0 = full splat, 1 = full point cloud.
-  let pcTransition = 0;
+  let pcTransition = 0; // Crossfade: 0 = splat, 1 = point cloud
   let renderScale = 1;
   let lastCameraMotionAt = performance.now();
   let lastScaleChangeAt = 0;
@@ -289,9 +226,12 @@ async function main() {
   let sortMsSample = 0;
   let sortMsPending = false;
 
-  // Restores a serialized 4x4 view matrix from URL hash.
-  // Returns false when hash is missing/invalid so caller can fallback to defaults.
-  const setViewFromHash = (hashValue: string) => {
+  // ==========================================================================
+  // URL HASH CAMERA PERSISTENCE
+  // ==========================================================================
+
+  /** Restores view matrix from URL hash, returns false if invalid */
+  const setViewFromHash = (hashValue: string): boolean => {
     const matrix = decodeViewMatrix(hashValue);
     if (!matrix) return false;
     controls.setViewMatrix(matrix);
@@ -299,69 +239,33 @@ async function main() {
     return true;
   };
 
-  // Persists the current camera matrix into URL hash for reproducible viewpoints.
+  /** Saves current view matrix to URL hash */
   const saveViewToHash = () => {
     location.hash = `#${encodeURIComponent(encodeViewMatrix(controls.viewMatrix))}`;
   };
 
+  // ==========================================================================
+  // SORT WORKER SETUP
+  // ==========================================================================
+
   /**
-   * SORT WORKER - Critical for Correct Alpha Blending
-   * ================================================
-   *
-   * 3D Gaussian Splatting requires back-to-front rendering order for correct
-   * alpha compositing. Since Gaussians overlap and are semi-transparent,
-   * drawing them in the wrong order produces incorrect colors.
-   *
    * The sort worker handles CPU-intensive tasks off the main thread:
-   *
-   * 1. PLY PARSING: Convert standard Gaussian PLY files to our internal format
-   *    - Extract position, scale, rotation (quaternion), color, opacity
-   *    - Precompute 3D covariance matrix from rotation and scale
-   *    - Pack data into GPU-friendly uint32 arrays
-   *
-   * 2. DEPTH SORTING: Every frame (or when camera moves significantly)
-   *    - Compute view-space depth for each Gaussian center
-   *    - Use counting sort (O(n)) for fast sorting of millions of splats
-   *    - Return sorted index array to main thread for GPU upload
-   *
-   * The sorting algorithm uses the view direction dot product for depth:
-   *   depth = viewDir.x * pos.x + viewDir.y * pos.y + viewDir.z * pos.z
-   *
-   * This is an approximation (doesn't account for Gaussian extent) but is
-   * fast enough for real-time rendering and produces good visual results.
+   * 1. PLY parsing and conversion to internal format
+   * 2. Depth sorting for correct alpha blending (back-to-front order)
    */
   const sortWorker = createSortWorker({
-    /**
-     * Called when worker completes depth sorting.
-     * The depthIndex array contains Gaussian indices in back-to-front order.
-     * GPU will draw instances in this order for correct alpha blending.
-     */
     onSortResult: ({ depthIndex, sortMs }) => {
       renderer.setSortedIndices(depthIndex);
       sortMsSample = sortMs;
       sortMsPending = true;
     },
-    /**
-     * Called when worker finishes preprocessing splat data.
-     * The splatData array contains packed GPU payload:
-     * - Position (3x float32 as uint32 bit patterns)
-     * - Covariance upper triangle (6x float16 packed into 3x uint32)
-     * - Color RGBA8 (packed into 1x uint32)
-     * Total: 8 uint32 = 32 bytes per Gaussian
-     */
     onSplatData: ({ splatData, vertexCount }) => {
       loadedVertices = vertexCount;
       renderer.setSplatData(splatData, vertexCount);
       dom.message.textContent = '';
       dom.dropzone.classList.add('hidden');
-
       centerCamera(splatData, vertexCount, controls);
     },
-    /**
-     * Optional conversion callback (PLY -> SPLAT buffer).
-     * In our current UX we do not auto-save on drop, but we keep download support
-     * for other flows that may set save=true.
-     */
     onConvertedBuffer: (buffer, save) => {
       const uint = new Uint8Array(buffer);
       loadedVertices = Math.floor(uint.byteLength / SPLAT_ROW_BYTES);
@@ -372,12 +276,16 @@ async function main() {
     },
   });
 
-  // If URL has a saved camera matrix, prefer that over baked dataset cameras.
+  // ==========================================================================
+  // INPUT HANDLING
+  // ==========================================================================
+
+  // Restore camera from URL hash, or use default preset
   if (!setViewFromHash(location.hash.slice(1))) {
     applyCamera(currentCameraIndex);
   }
 
-  // Camera hotkeys (+/-/0-9/P/V).
+  // Register keyboard shortcuts
   registerKeyboardShortcuts({
     applyCamera,
     getCurrentCameraIndex: () => currentCameraIndex,
@@ -385,26 +293,24 @@ async function main() {
     setCarousel: (enabled) => controls.setCarousel(enabled),
   });
 
-  // Keep hash-driven camera restoration reactive.
+  // Handle URL hash changes
   window.addEventListener('hashchange', () => {
     setViewFromHash(location.hash.slice(1));
   });
 
-  // File-drop entrypoint for scene and camera data.
+  // Register drag-and-drop file handling
   registerDragDrop({
     onFile: async (file) => {
       controls.setCarousel(false);
       dom.message.textContent = `Loading ${file.name}...`;
 
-      // Support optional camera metadata sidecar.
+      // Handle camera JSON files
       if (/\.json$/i.test(file.name)) {
         const parsed = JSON.parse(await file.text()) as CameraPose[];
         if (Array.isArray(parsed) && parsed.length > 0) {
           cameras = parsed;
           if (cameraGui) {
-            updateCameraDropdown(parsed, cameraGui, {
-              onApplyCamera: (index: number) => applyCamera(index),
-            });
+            updateCameraDropdown(parsed, cameraGui, guiCallbacks);
           }
           applyCamera(0);
           dom.message.textContent = '';
@@ -412,9 +318,7 @@ async function main() {
         return;
       }
 
-      // Scene payload path:
-      // - PLY: decode in worker (standard or compressed)
-      // - SPLAT: send directly to worker sorting path
+      // Handle scene files (PLY or SPLAT)
       const buffer = await file.arrayBuffer();
       if (isPlyBuffer(buffer)) {
         sortWorker.postPlyBuffer(buffer, false);
@@ -427,8 +331,13 @@ async function main() {
       dom.dropzone.classList.add('hidden');
     },
   });
+
   dom.progress.style.display = 'none';
   dom.message.textContent = '';
+
+  // ==========================================================================
+  // RENDER LOOP
+  // ==========================================================================
 
   let lastFrame = performance.now();
   let smoothedFps = 0;
@@ -437,76 +346,49 @@ async function main() {
   let smoothedRenderMs = 0;
 
   /**
-   * MAIN RENDER LOOP - The Heart of 3DGS Rendering
-   * ==============================================
+   * Main render loop - called every frame via requestAnimationFrame.
    *
-   * This is called every frame (~60fps) via requestAnimationFrame.
-   * The loop performs these steps:
-   *
-   * 1. UPDATE CONTROLS
-   *    - Process keyboard/mouse input
-   *    - Apply inertia for smooth camera movement
-   *    - Update view matrix (camera pose in world space)
-   *
-   * 2. COMPUTE PROJECTION
-   *    - Build projection matrix from FOV and viewport
-   *    - Combine view * projection = viewProjection matrix
-   *    - The viewProjection transforms world coords → clip coords
-   *
-   * 3. TRIGGER SORT (if camera moved)
-   *    - Send viewProjection to worker
-   *    - Worker sorts Gaussians by depth using view direction
-   *    - Sorted indices uploaded to GPU when ready
-   *
-   * 4. RENDER
-   *    - For each Gaussian (as GPU instances):
-   *      a. Vertex shader projects center to screen
-   *      b. Computes 2D covariance via Jacobian projection
-   *      c. Extracts ellipse axes from eigenvalues
-   *      d. Expands quad corners along axes
-   *      e. Fragment shader evaluates exp(-0.5 * r²) falloff
-   *      f. Alpha blends using "one-minus-dst-alpha" mode
-   *
-   * 5. UPDATE STATS
-   *    - FPS counter
-   *    - Sort/upload/render timings
-   *
-   * The alpha blending mode is crucial:
-   *   color: srcFactor='one-minus-dst-alpha', dstFactor='one'
-   *
-   * This implements front-to-back compositing where:
-   *   dst = src * (1 - dst.a) + dst
-   *
-   * But we draw back-to-front, so we accumulate:
-   *   result = Σ (color_i * alpha_i * Π(1 - alpha_j)) for j < i
+   * Steps:
+   * 1. Update camera controls (process input, apply inertia)
+   * 2. Animate camera transitions if active
+   * 3. Compute projection matrix from FOV and viewport
+   * 4. Send viewProjection to sort worker if camera moved
+   * 5. Render all Gaussians with current sorted order
+   * 6. Update performance stats
    */
   const frame = (now: number) => {
     const dtMs = Math.max(now - lastFrame, 0.0001);
     const dtForControls = Math.min(dtMs, 34);
     lastFrame = now;
 
+    // Update camera controls
     controls.update(dtForControls);
 
+    // Cancel animation if user is interacting
     if (controls.isInteracting) {
       targetViewMatrix = null;
     }
 
+    // Animate camera transition
     if (targetViewMatrix) {
       const elapsed = now - animationStartTime;
       const duration = Math.max(renderOptions.animationDuration, 1);
       const t = Math.min(elapsed / duration, 1);
-      const ease = t * t * (3 - 2 * t);
+      const ease = t * t * (3 - 2 * t); // Smoothstep easing
+
       const current = controls.viewMatrix;
       const next: Mat4 = [];
       for (let i = 0; i < 16; i++) {
         next[i] = current[i] + (targetViewMatrix[i] - current[i]) * ease;
       }
       controls.setViewMatrix(next);
+
       if (t >= 1) {
         targetViewMatrix = null;
       }
     }
 
+    // Track camera motion for adaptive resolution
     let viewDelta = 0;
     for (let i = 0; i < 16; i++) {
       const current = controls.viewMatrix[i];
@@ -517,6 +399,7 @@ async function main() {
       lastCameraMotionAt = now;
     }
 
+    // Adaptive resolution: lower during motion, restore when still
     const cameraActive = now - lastCameraMotionAt < 140;
     const canChangeScale = now - lastScaleChangeAt > 180;
     if (cameraActive && renderScale > 0.7 && canChangeScale) {
@@ -529,7 +412,7 @@ async function main() {
       renderer.setResolutionScale(renderScale);
     }
 
-    // Animate the splat ↔ point-cloud crossfade at ~500 ms total duration.
+    // Animate splat ↔ point cloud crossfade
     const pcTarget = renderOptions.pointCloud ? 1 : 0;
     if (pcTransition !== pcTarget) {
       const step = (dtMs / 500) * Math.sign(pcTarget - pcTransition);
@@ -538,12 +421,12 @@ async function main() {
           ? Math.min(pcTarget, pcTransition + step)
           : Math.max(pcTarget, pcTransition + step);
 
-      // Snap to target to avoid floating point drift keeps isCrossfading=true.
       if (Math.abs(pcTransition - pcTarget) < 0.001) {
         pcTransition = pcTarget;
       }
     }
 
+    // Compute projection matrix
     const dpr = Math.max(1, window.devicePixelRatio || 1);
     const logicalWidth = Math.max(1, Math.round(dom.canvas.clientWidth * dpr));
     const logicalHeight = Math.max(1, Math.round(dom.canvas.clientHeight * dpr));
@@ -553,6 +436,7 @@ async function main() {
     const fovFx = fovFy * fxFyRatio;
     const projection = getProjectionMatrix(fovFx, fovFy, logicalWidth, logicalHeight);
 
+    // Post view-projection to sort worker if needed
     const viewProj = multiply4(projection, controls.viewMatrix);
     let maxViewProjDelta = 0;
     for (let i = 0; i < 16; i++) {
@@ -564,6 +448,7 @@ async function main() {
       !hasPostedViewProj ||
       (maxViewProjDelta > 0.0005 && timeSincePost >= postIntervalMs) ||
       timeSincePost >= 220;
+
     if (shouldPostView) {
       sortWorker.postViewProjection(viewProj);
       for (let i = 0; i < 16; i++) {
@@ -572,6 +457,8 @@ async function main() {
       hasPostedViewProj = true;
       lastViewProjPostAt = now;
     }
+
+    // Render frame
     const eyeOffset = renderOptions.stereoMode === 'anaglyph' ? 0.04 : 0.065;
     renderer.render({
       projection,
@@ -597,8 +484,9 @@ async function main() {
       tint: renderOptions.tint,
       alpha: renderOptions.alpha,
     });
-    const timings = renderer.consumeTimings();
 
+    // Update performance stats
+    const timings = renderer.consumeTimings();
     const fps = 1000 / dtMs;
     smoothedFps = smoothedFps * 0.9 + fps * 0.1;
     smoothedUploadMs = smoothedUploadMs * 0.85 + timings.uploadMs * 0.15;
@@ -609,316 +497,23 @@ async function main() {
     } else {
       smoothedSortMs *= 0.99;
     }
+
     dom.fps.textContent = `${Math.round(smoothedFps)} fps | ${loadedVertices.toLocaleString()} pts | sort ${smoothedSortMs.toFixed(1)}ms | upload ${smoothedUploadMs.toFixed(2)}ms | render ${smoothedRenderMs.toFixed(2)}ms`;
+
     requestAnimationFrame(frame);
   };
+
+  // ==========================================================================
+  // CLEANUP AND START
+  // ==========================================================================
 
   window.addEventListener('beforeunload', () => sortWorker.terminate());
   window.addEventListener('beforeunload', () => gui.destroy());
   requestAnimationFrame(frame);
 }
 
+// Start the application
 main().catch((err: unknown) => {
   const text = err instanceof Error ? err.message : String(err);
   dom.message.textContent = `Renderer init failed: ${text}`;
 });
-
-function getViewerDom(): ViewerDom {
-  // We query from #app to avoid accidental collisions with unrelated DOM ids.
-  const app = document.querySelector<HTMLDivElement>('#app');
-  if (!app) throw new Error('Missing #app root element');
-
-  const canvas = app.querySelector<HTMLCanvasElement>('#canvas');
-  const message = app.querySelector<HTMLDivElement>('#message');
-  const fps = app.querySelector<HTMLSpanElement>('#fps');
-  const progress = app.querySelector<HTMLDivElement>('#progress');
-  const dropzone = app.querySelector<HTMLDivElement>('#dropzone');
-  const anaglyphButton = app.querySelector<HTMLButtonElement>('#btn-anaglyph');
-  const stereoButton = app.querySelector<HTMLButtonElement>('#btn-stereo');
-
-  if (!canvas || !message || !fps || !progress || !dropzone || !anaglyphButton || !stereoButton) {
-    throw new Error('Missing viewer DOM nodes');
-  }
-
-  return { canvas, message, fps, progress, dropzone, anaglyphButton, stereoButton };
-}
-
-function normalizeIndex(index: number, size: number): number {
-  // "safe modulo" that works for negative inputs as well.
-  return ((index % size) + size) % size;
-}
-
-function decodeViewMatrix(encoded: string): Mat4 | null {
-  if (!encoded) return null;
-  try {
-    const parsed = JSON.parse(decodeURIComponent(encoded)) as unknown;
-    if (!Array.isArray(parsed) || parsed.length !== 16) return null;
-    const matrix = parsed.map(Number);
-    if (matrix.some((value) => Number.isNaN(value))) return null;
-    return matrix as Mat4;
-  } catch {
-    return null;
-  }
-}
-
-function encodeViewMatrix(matrix: Mat4): string {
-  // Quantize for shorter URL hash while keeping usable precision.
-  const rounded = matrix.map((value) => Math.round(value * 100) / 100);
-  return JSON.stringify(rounded);
-}
-
-function downloadBinary(data: Uint8Array, filename: string) {
-  // Create an owned copy so the Blob payload is stable even if caller
-  // reuses/mutates the original typed array.
-  const copy = new Uint8Array(data);
-  const blob = new Blob([copy.buffer], { type: 'application/octet-stream' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.download = filename;
-  link.href = url;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-}
-
-function isPlyBuffer(buffer: ArrayBuffer): boolean {
-  // Header-only check; sufficient for routing dropped files.
-  const bytes = new Uint8Array(buffer);
-  return PLY_MAGIC.every((value, index) => bytes[index] === value);
-}
-
-function registerKeyboardShortcuts(params: {
-  applyCamera: (index: number) => void;
-  getCurrentCameraIndex: () => number;
-  saveViewToHash: () => void;
-  setCarousel: (enabled: boolean) => void;
-}) {
-  const { applyCamera, getCurrentCameraIndex, saveViewToHash, setCarousel } = params;
-
-  // We use keydown only; camera navigation actions are stateless per keypress.
-  window.addEventListener('keydown', (event) => {
-    if (/^\d$/.test(event.key)) {
-      applyCamera(Number.parseInt(event.key, 10));
-      return;
-    }
-    if (event.key === '-' || event.key === '_') {
-      applyCamera(getCurrentCameraIndex() - 1);
-      return;
-    }
-    if (event.key === '+' || event.key === '=') {
-      applyCamera(getCurrentCameraIndex() + 1);
-      return;
-    }
-    if (event.code === 'KeyP') {
-      setCarousel(true);
-      return;
-    }
-    if (event.code === 'KeyV') {
-      saveViewToHash();
-    }
-  });
-}
-
-function registerDragDrop(params: { onFile: (file: File) => Promise<void> }) {
-  const { onFile } = params;
-
-  // Prevent browser default "open file in tab" behavior so the app can own drop flow.
-  const preventDefault = (event: DragEvent) => {
-    event.preventDefault();
-    event.stopPropagation();
-  };
-
-  document.addEventListener('dragenter', preventDefault);
-  document.addEventListener('dragover', preventDefault);
-  document.addEventListener('dragleave', preventDefault);
-  document.addEventListener('drop', (event) => {
-    preventDefault(event);
-    const file = event.dataTransfer?.files?.[0];
-    if (!file) return;
-    void onFile(file);
-  });
-}
-
-function centerCamera(
-  splatData: Uint32Array,
-  vertexCount: number,
-  controls: ReturnType<typeof createControls>,
-) {
-  if (vertexCount === 0) return;
-
-  let avgX = 0,
-    avgY = 0,
-    avgZ = 0;
-  const sampleSize = Math.min(vertexCount, 10000);
-  const step = Math.floor(vertexCount / sampleSize) * 8;
-  const positions = new Float32Array(sampleSize * 3);
-
-  for (let i = 0; i < sampleSize; i++) {
-    const x = new Float32Array(splatData.buffer, i * step * 4, 1)[0];
-    const y = new Float32Array(splatData.buffer, (i * step + 1) * 4, 1)[0];
-    const z = new Float32Array(splatData.buffer, (i * step + 2) * 4, 1)[0];
-    avgX += x;
-    avgY += y;
-    avgZ += z;
-    positions[i * 3] = x;
-    positions[i * 3 + 1] = y;
-    positions[i * 3 + 2] = z;
-  }
-
-  const center = [avgX / sampleSize, avgY / sampleSize, avgZ / sampleSize];
-
-  // Get current camera orientation (Forward, Right, Up vectors from current view matrix).
-  const nR = [controls.viewMatrix[0], controls.viewMatrix[4], controls.viewMatrix[8]];
-  const nU = [controls.viewMatrix[1], controls.viewMatrix[5], controls.viewMatrix[9]];
-  const nF = [controls.viewMatrix[2], controls.viewMatrix[6], controls.viewMatrix[10]];
-
-  // Set camera position directly to the center.
-  const camPos = center;
-
-  const nextView: Mat4 = [
-    nR[0],
-    nU[0],
-    nF[0],
-    0,
-    nR[1],
-    nU[1],
-    nF[1],
-    0,
-    nR[2],
-    nU[2],
-    nF[2],
-    0,
-    -camPos[0] * nR[0] - camPos[1] * nU[0] - camPos[2] * nF[0],
-    -camPos[0] * nR[1] - camPos[1] * nU[1] - camPos[2] * nF[1],
-    -camPos[0] * nR[2] - camPos[1] * nU[2] - camPos[2] * nF[2],
-    1,
-  ];
-  controls.setViewMatrix(nextView);
-}
-
-function createGui(
-  renderOptions: RenderOptions,
-  callbacks: {
-    onCamerasLoaded: (cameras: CameraPose[], cameraGui: any, callbacks: any) => void;
-    onApplyCamera: (index: number) => void;
-    onLogPose: () => void;
-    onReset: () => void;
-  },
-) {
-  const gui = new GUI({ title: 'Render' });
-
-  gui
-    .add(
-      {
-        reset: () => {
-          callbacks.onReset();
-        },
-      },
-      'reset',
-    )
-    .name('Reset All Settings');
-
-  const splatGui = gui.addFolder('Splat Settings');
-  splatGui.add(renderOptions, 'pointCloud').name('Point Cloud');
-  splatGui.add(renderOptions, 'pointSize', 0.5, 6, 0.1).name('Point Size');
-  splatGui.add(renderOptions, 'splatScale', 0, 1, 0.001).name('Splatscale');
-  splatGui.add(renderOptions, 'antialias', 0, 4, 0.001).name('Antialias');
-  splatGui.close();
-
-  const cameraGui = gui.addFolder('Camera');
-  cameraGui.add(renderOptions, 'fov', 20, 120, 0.1).name('FOV');
-  cameraGui.add(renderOptions, 'animateCamera').name('Animate Transitions');
-  cameraGui.add(renderOptions, 'animationDuration', 0, 3000, 1).name('Animation duration (ms)');
-
-  cameraGui
-    .add(
-      {
-        loadCameras: () => {
-          const input = document.createElement('input');
-          input.type = 'file';
-          input.accept = '.json';
-          input.onchange = async () => {
-            const file = input.files?.[0];
-            if (!file) return;
-            try {
-              const parsed = JSON.parse(await file.text()) as CameraPose[];
-              if (Array.isArray(parsed) && parsed.length > 0) {
-                callbacks.onCamerasLoaded(parsed, cameraGui, callbacks);
-                callbacks.onApplyCamera(0);
-                dom.message.textContent = '';
-              }
-            } catch (err) {
-              dom.message.textContent = `Error loading cameras: ${err instanceof Error ? err.message : String(err)}`;
-            }
-          };
-          input.click();
-        },
-      },
-      'loadCameras',
-    )
-    .name('Load Cameras');
-
-  cameraGui
-    .add(
-      {
-        logPose: () => {
-          callbacks.onLogPose();
-        },
-      },
-      'logPose',
-    )
-    .name('Log Camera Pose');
-
-  cameraGui.close();
-
-  const colorGui = gui.addFolder('Adjust Colors');
-  colorGui.add(renderOptions, 'brightness', -1, 1, 0.001).name('Brightness');
-  colorGui.add(renderOptions, 'contrast', 0, 3, 0.001).name('Contrast');
-  colorGui.add(renderOptions, 'gamma', 0.1, 3, 0.001).name('Gamma');
-  colorGui.add(renderOptions, 'blackLevel', -1, 1, 0.001).name('Blacklevel');
-  colorGui.add(renderOptions, 'whiteLevel', -1, 1, 0.001).name('Whitelevel');
-  colorGui.add(renderOptions, 'intensity', 0, 3, 0.001).name('Intensity');
-  colorGui.add(renderOptions, 'saturate', 0, 3, 0.001).name('Saturate');
-  colorGui.add(renderOptions, 'vibrance', -1, 1, 0.001).name('Vibrance');
-  colorGui.add(renderOptions, 'temperature', -1, 1, 0.001).name('Temperature');
-  colorGui.add(renderOptions, 'tint', -1, 1, 0.001).name('Tint');
-  colorGui.add(renderOptions, 'alpha', 0, 1, 0.001).name('Alpha');
-  colorGui.close();
-  return gui;
-}
-
-function getEyeViewMatrix(view: Mat4, eyeOffset: number): Mat4 {
-  const inv = invert4(view);
-  if (!inv) return view;
-  const shifted = translate4(inv, eyeOffset, 0, 0);
-  const out = invert4(shifted);
-  return out ?? view;
-}
-
-function setupStereoButtons(
-  viewerDom: ViewerDom,
-  renderOptions: { stereoMode: 'off' | 'anaglyph' | 'sbs' },
-) {
-  const updateUi = () => {
-    const anaglyphActive = renderOptions.stereoMode === 'anaglyph';
-    const stereoActive = renderOptions.stereoMode === 'sbs';
-    viewerDom.anaglyphButton.classList.toggle('active', anaglyphActive);
-    viewerDom.stereoButton.classList.toggle('active', stereoActive);
-    viewerDom.anaglyphButton.setAttribute('aria-pressed', String(anaglyphActive));
-    viewerDom.stereoButton.setAttribute('aria-pressed', String(stereoActive));
-  };
-
-  viewerDom.anaglyphButton.addEventListener('click', () => {
-    renderOptions.stereoMode = renderOptions.stereoMode === 'anaglyph' ? 'off' : 'anaglyph';
-    updateUi();
-  });
-
-  viewerDom.stereoButton.addEventListener('click', () => {
-    renderOptions.stereoMode = renderOptions.stereoMode === 'sbs' ? 'off' : 'sbs';
-    updateUi();
-  });
-
-  updateUi();
-  return updateUi;
-}
