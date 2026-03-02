@@ -29,6 +29,28 @@ interface ViewerDom {
   stereoButton: HTMLButtonElement;
 }
 
+interface RenderOptions {
+  pointCloud: boolean;
+  pointSize: number;
+  stereoMode: 'off' | 'anaglyph' | 'sbs';
+  fov: number;
+  splatScale: number;
+  antialias: number;
+  brightness: number;
+  contrast: number;
+  gamma: number;
+  blackLevel: number;
+  whiteLevel: number;
+  intensity: number;
+  saturate: number;
+  vibrance: number;
+  temperature: number;
+  tint: number;
+  alpha: number;
+  animateCamera: boolean;
+  animationDuration: number;
+}
+
 const dom = getViewerDom();
 
 async function main() {
@@ -142,7 +164,7 @@ async function main() {
         fx: controls.camera.fx,
       };
       console.log('Current Camera Pose:', JSON.stringify(pose, null, 2));
-    }
+    },
   });
   setupStereoButtons(dom, renderOptions);
 
@@ -194,44 +216,7 @@ async function main() {
       dom.message.textContent = '';
       dom.dropzone.classList.add('hidden');
 
-      // Center camera on the bounding box of the splat data.
-      if (vertexCount > 0) {
-        let avgX = 0, avgY = 0, avgZ = 0;
-        const sampleSize = Math.min(vertexCount, 10000);
-        const step = Math.floor(vertexCount / sampleSize) * 8;
-        const positions = new Float32Array(sampleSize * 3);
-        for (let i = 0; i < sampleSize; i++) {
-            const x = new Float32Array(splatData.buffer, i * step * 4, 1)[0];
-            const y = new Float32Array(splatData.buffer, (i * step + 1) * 4, 1)[0];
-            const z = new Float32Array(splatData.buffer, (i * step + 2) * 4, 1)[0];
-            avgX += x;
-            avgY += y;
-            avgZ += z;
-            positions[i*3] = x;
-            positions[i*3+1] = y;
-            positions[i*3+2] = z;
-        }
-        const center = [avgX / sampleSize, avgY / sampleSize, avgZ / sampleSize];
-
-        // Get current camera orientation (Forward, Right, Up vectors from current view matrix).
-        const nR = [controls.viewMatrix[0], controls.viewMatrix[4], controls.viewMatrix[8]];
-        const nU = [controls.viewMatrix[1], controls.viewMatrix[5], controls.viewMatrix[9]];
-        const nF = [controls.viewMatrix[2], controls.viewMatrix[6], controls.viewMatrix[10]];
-
-        // Set camera position directly to the center.
-        const camPos = center;
-        
-        const nextView: Mat4 = [
-            nR[0], nU[0], nF[0], 0,
-            nR[1], nU[1], nF[1], 0,
-            nR[2], nU[2], nF[2], 0,
-            -camPos[0]*nR[0] - camPos[1]*nU[0] - camPos[2]*nF[0],
-            -camPos[0]*nR[1] - camPos[1]*nU[1] - camPos[2]*nF[1],
-            -camPos[0]*nR[2] - camPos[1]*nU[2] - camPos[2]*nF[2],
-            1
-        ];
-        controls.setViewMatrix(nextView);
-      }
+      centerCamera(splatData, vertexCount, controls);
     },
     // Optional conversion callback (PLY -> SPLAT buffer).
     // In our current UX we do not auto-save on drop, but we keep download support
@@ -386,12 +371,7 @@ async function main() {
     const fovFy = logicalHeight / (2 * Math.tan(fovRad / 2));
     const fxFyRatio = controls.camera.fx / Math.max(controls.camera.fy, 1e-6);
     const fovFx = fovFy * fxFyRatio;
-    const projection = getProjectionMatrix(
-      fovFx,
-      fovFy,
-      logicalWidth,
-      logicalHeight,
-    );
+    const projection = getProjectionMatrix(fovFx, fovFy, logicalWidth, logicalHeight);
 
     const viewProj = multiply4(projection, controls.viewMatrix);
     let maxViewProjDelta = 0;
@@ -476,15 +456,7 @@ function getViewerDom(): ViewerDom {
   const anaglyphButton = app.querySelector<HTMLButtonElement>('#btn-anaglyph');
   const stereoButton = app.querySelector<HTMLButtonElement>('#btn-stereo');
 
-  if (
-    !canvas ||
-    !message ||
-    !fps ||
-    !progress ||
-    !dropzone ||
-    !anaglyphButton ||
-    !stereoButton
-  ) {
+  if (!canvas || !message || !fps || !progress || !dropzone || !anaglyphButton || !stereoButton) {
     throw new Error('Missing viewer DOM nodes');
   }
 
@@ -542,8 +514,7 @@ function registerKeyboardShortcuts(params: {
   saveViewToHash: () => void;
   setCarousel: (enabled: boolean) => void;
 }) {
-  const { applyCamera, getCurrentCameraIndex, saveViewToHash, setCarousel } =
-    params;
+  const { applyCamera, getCurrentCameraIndex, saveViewToHash, setCarousel } = params;
 
   // We use keydown only; camera navigation actions are stateless per keypress.
   window.addEventListener('keydown', (event) => {
@@ -589,27 +560,65 @@ function registerDragDrop(params: { onFile: (file: File) => Promise<void> }) {
   });
 }
 
+function centerCamera(
+  splatData: Uint32Array,
+  vertexCount: number,
+  controls: ReturnType<typeof createControls>,
+) {
+  if (vertexCount === 0) return;
+
+  let avgX = 0,
+    avgY = 0,
+    avgZ = 0;
+  const sampleSize = Math.min(vertexCount, 10000);
+  const step = Math.floor(vertexCount / sampleSize) * 8;
+  const positions = new Float32Array(sampleSize * 3);
+
+  for (let i = 0; i < sampleSize; i++) {
+    const x = new Float32Array(splatData.buffer, i * step * 4, 1)[0];
+    const y = new Float32Array(splatData.buffer, (i * step + 1) * 4, 1)[0];
+    const z = new Float32Array(splatData.buffer, (i * step + 2) * 4, 1)[0];
+    avgX += x;
+    avgY += y;
+    avgZ += z;
+    positions[i * 3] = x;
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = z;
+  }
+
+  const center = [avgX / sampleSize, avgY / sampleSize, avgZ / sampleSize];
+
+  // Get current camera orientation (Forward, Right, Up vectors from current view matrix).
+  const nR = [controls.viewMatrix[0], controls.viewMatrix[4], controls.viewMatrix[8]];
+  const nU = [controls.viewMatrix[1], controls.viewMatrix[5], controls.viewMatrix[9]];
+  const nF = [controls.viewMatrix[2], controls.viewMatrix[6], controls.viewMatrix[10]];
+
+  // Set camera position directly to the center.
+  const camPos = center;
+
+  const nextView: Mat4 = [
+    nR[0],
+    nU[0],
+    nF[0],
+    0,
+    nR[1],
+    nU[1],
+    nF[1],
+    0,
+    nR[2],
+    nU[2],
+    nF[2],
+    0,
+    -camPos[0] * nR[0] - camPos[1] * nU[0] - camPos[2] * nF[0],
+    -camPos[0] * nR[1] - camPos[1] * nU[1] - camPos[2] * nF[1],
+    -camPos[0] * nR[2] - camPos[1] * nU[2] - camPos[2] * nF[2],
+    1,
+  ];
+  controls.setViewMatrix(nextView);
+}
+
 function createGui(
-  renderOptions: {
-    pointCloud: boolean;
-    pointSize: number;
-    fov: number;
-    splatScale: number;
-    antialias: number;
-    brightness: number;
-    contrast: number;
-    gamma: number;
-    blackLevel: number;
-    whiteLevel: number;
-    intensity: number;
-    saturate: number;
-    vibrance: number;
-    temperature: number;
-    tint: number;
-    alpha: number;
-    animateCamera: boolean;
-    animationDuration: number;
-  },
+  renderOptions: RenderOptions,
   callbacks: {
     onCamerasLoaded: (cameras: CameraPose[], cameraGui: any, callbacks: any) => void;
     onApplyCamera: (index: number) => void;
@@ -630,34 +639,44 @@ function createGui(
   cameraGui.add(renderOptions, 'animateCamera').name('Animate Transitions');
   cameraGui.add(renderOptions, 'animationDuration', 0, 3000, 1).name('Animation duration (ms)');
 
-  cameraGui.add({
-    loadCameras: () => {
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = '.json';
-      input.onchange = async () => {
-        const file = input.files?.[0];
-        if (!file) return;
-        try {
-          const parsed = JSON.parse(await file.text()) as CameraPose[];
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            callbacks.onCamerasLoaded(parsed, cameraGui, callbacks);
-            callbacks.onApplyCamera(0);
-            dom.message.textContent = '';
-          }
-        } catch (err) {
-          dom.message.textContent = `Error loading cameras: ${err instanceof Error ? err.message : String(err)}`;
-        }
-      };
-      input.click();
-    }
-  }, 'loadCameras').name('Load Cameras');
+  cameraGui
+    .add(
+      {
+        loadCameras: () => {
+          const input = document.createElement('input');
+          input.type = 'file';
+          input.accept = '.json';
+          input.onchange = async () => {
+            const file = input.files?.[0];
+            if (!file) return;
+            try {
+              const parsed = JSON.parse(await file.text()) as CameraPose[];
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                callbacks.onCamerasLoaded(parsed, cameraGui, callbacks);
+                callbacks.onApplyCamera(0);
+                dom.message.textContent = '';
+              }
+            } catch (err) {
+              dom.message.textContent = `Error loading cameras: ${err instanceof Error ? err.message : String(err)}`;
+            }
+          };
+          input.click();
+        },
+      },
+      'loadCameras',
+    )
+    .name('Load Cameras');
 
-  cameraGui.add({
-    logPose: () => {
-      callbacks.onLogPose();
-    }
-  }, 'logPose').name('Log Camera Pose');
+  cameraGui
+    .add(
+      {
+        logPose: () => {
+          callbacks.onLogPose();
+        },
+      },
+      'logPose',
+    )
+    .name('Log Camera Pose');
 
   cameraGui.close();
 
@@ -684,7 +703,6 @@ function getEyeViewMatrix(view: Mat4, eyeOffset: number): Mat4 {
   const out = invert4(shifted);
   return out ?? view;
 }
-
 
 function setupStereoButtons(
   viewerDom: ViewerDom,

@@ -108,9 +108,15 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
       const axisY = [viewMatrix[4], viewMatrix[5], viewMatrix[6]];
       const axisYLen = Math.hypot(axisY[0], axisY[1], axisY[2]);
       if (axisYLen > 1e-6) {
-        next = rotate4(next, 5 * sdx, axisY[0] / axisYLen, axisY[1] / axisYLen, axisY[2] / axisYLen);
+        next = rotate4(
+          next,
+          5 * sdx,
+          axisY[0] / axisYLen,
+          axisY[1] / axisYLen,
+          axisY[2] / axisYLen,
+        );
       }
-      
+
       // Clamp pitch to prevent flipping over the poles (axisY[2] is world-up's Z in camera space).
       const currentPitch = axisY[2] / axisYLen;
       if ((sdy > 0 && currentPitch < 0.98) || (sdy < 0 && currentPitch > -0.98)) {
@@ -182,7 +188,7 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
             axisY[2] / axisYLen,
           );
         }
-        
+
         // Apply pitch inertia with clamping.
         const currentPitch = axisY[2] / axisYLen;
         const pitchDelta = -5 * orbitVelocity.dy * dtFactor;

@@ -101,8 +101,7 @@ body {
   align-items: center;
   justify-content: center;
   padding: 0;
-  transition:
-    background 100ms ease;
+  transition: background 100ms ease;
 }
 
 .stereo-btn.active {

@@ -163,7 +163,8 @@ export const DEFAULT_CAMERAS: CameraPose[] = [
 ];
 
 export const DEFAULT_VIEW_MATRIX: Mat4 = [
-  0.471108, -0.01768, 0.88, 0, 0, 0.999799, 0.02, 0, -0.882075, -0.009442, 0.47, 0, 0.07, 0.03, 6.55, 1,
+  0.471108, -0.01768, 0.88, 0, 0, 0.999799, 0.02, 0, -0.882075, -0.009442, 0.47, 0, 0.07, 0.03,
+  6.55, 1,
 ];
 
 export function getProjectionMatrix(fx: number, fy: number, width: number, height: number): Mat4 {
