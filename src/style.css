@@ -76,7 +76,9 @@ body {
   line-height: 1.4;
   z-index: 3;
   cursor: pointer;
-  transition: border-color 150ms ease, background 150ms ease;
+  transition:
+    border-color 150ms ease,
+    background 150ms ease;
 }
 
 #dropzone:hover {

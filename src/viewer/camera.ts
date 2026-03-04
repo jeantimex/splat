@@ -275,31 +275,31 @@ export const DEFAULT_VIEW_MATRIX: Mat4 = [
  * @returns 4x4 projection matrix in column-major order
  */
 export function getProjectionMatrix(fx: number, fy: number, width: number, height: number): Mat4 {
-  const znear = 0.2;   // Near clip plane
-  const zfar = 200;    // Far clip plane
+  const znear = 0.2; // Near clip plane
+  const zfar = 200; // Far clip plane
 
   // Column-major 4x4 projection matrix
   // Note: fy is negated because screen Y is typically inverted (Y-down)
   return [
     // Column 0
-    (2 * fx) / width,  // m00: X scale
+    (2 * fx) / width, // m00: X scale
     0,
     0,
     0,
     // Column 1
     0,
-    -(2 * fy) / height,  // m11: Y scale (negated for Y-down)
+    -(2 * fy) / height, // m11: Y scale (negated for Y-down)
     0,
     0,
     // Column 2
     0,
     0,
-    zfar / (zfar - znear),  // m22: Z scale for [0,1] depth
-    1,                       // m32: perspective divide indicator
+    zfar / (zfar - znear), // m22: Z scale for [0,1] depth
+    1, // m32: perspective divide indicator
     // Column 3
     0,
     0,
-    -(zfar * znear) / (zfar - znear),  // m23: Z translation
+    -(zfar * znear) / (zfar - znear), // m23: Z translation
     0,
   ];
 }
@@ -338,13 +338,25 @@ export function getViewMatrix(camera: CameraPose): Mat4 {
   // Column-major 4x4 view matrix
   return [
     // Column 0 (camera X axis in world)
-    r[0], r[1], r[2], 0,
+    r[0],
+    r[1],
+    r[2],
+    0,
     // Column 1 (camera Y axis in world)
-    r[3], r[4], r[5], 0,
+    r[3],
+    r[4],
+    r[5],
+    0,
     // Column 2 (camera Z axis in world)
-    r[6], r[7], r[8], 0,
+    r[6],
+    r[7],
+    r[8],
+    0,
     // Column 3 (translation to camera origin)
-    tx, ty, tz, 1,
+    tx,
+    ty,
+    tz,
+    1,
   ];
 }
 
@@ -416,7 +428,7 @@ export function invert4(a: Mat4): Mat4 | null {
 
   // Compute determinant using Laplace expansion
   const det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
-  if (!det) return null;  // Singular matrix, no inverse
+  if (!det) return null; // Singular matrix, no inverse
 
   // Compute adjugate matrix divided by determinant
   return [
@@ -462,7 +474,7 @@ export function invert4(a: Mat4): Mat4 | null {
 export function rotate4(a: Mat4, rad: number, x: number, y: number, z: number): Mat4 {
   // Normalize rotation axis
   const len = Math.hypot(x, y, z);
-  if (!len) return a;  // Zero-length axis, no rotation
+  if (!len) return a; // Zero-length axis, no rotation
 
   x /= len;
   y /= len;
@@ -531,9 +543,9 @@ export function translate4(a: Mat4, x: number, y: number, z: number): Mat4 {
     // Columns 0-2 unchanged
     ...a.slice(0, 12),
     // Column 3 (updated translation)
-    a[0] * x + a[4] * y + a[8] * z + a[12],   // tx
-    a[1] * x + a[5] * y + a[9] * z + a[13],   // ty
-    a[2] * x + a[6] * y + a[10] * z + a[14],  // tz
-    a[3] * x + a[7] * y + a[11] * z + a[15],  // tw (usually 1)
+    a[0] * x + a[4] * y + a[8] * z + a[12], // tx
+    a[1] * x + a[5] * y + a[9] * z + a[13], // ty
+    a[2] * x + a[6] * y + a[10] * z + a[14], // tz
+    a[3] * x + a[7] * y + a[11] * z + a[15], // tw (usually 1)
   ];
 }

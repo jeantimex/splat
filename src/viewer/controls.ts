@@ -128,8 +128,8 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
    * Velocities decay exponentially: v *= decay^(dt/reference_frame_time)
    * This ensures consistent feel regardless of frame rate.
    */
-  const INERTIA_DECAY = 0.92;  // Fraction retained per 60fps frame for orbit/pan
-  const SCROLL_DECAY = 0.5;    // Faster decay for scroll (feels more responsive)
+  const INERTIA_DECAY = 0.92; // Fraction retained per 60fps frame for orbit/pan
+  const SCROLL_DECAY = 0.5; // Faster decay for scroll (feels more responsive)
 
   let orbitVelocity = { dx: 0, dy: 0 };
   let panVelocity = { dx: 0, dy: 0 };
@@ -217,8 +217,8 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
        * To find world-Y in view matrix coordinates, we read column 1
        * (the camera's Y basis vector in world space).
        */
-      const d = 4;  // Orbit distance (units in front of camera)
-      let next = translate4(inv, 0, 0, d);  // Step back to orbit point
+      const d = 4; // Orbit distance (units in front of camera)
+      let next = translate4(inv, 0, 0, d); // Step back to orbit point
 
       // Extract camera's Y-axis (world up) from view matrix
       const axisY = [viewMatrix[4], viewMatrix[5], viewMatrix[6]];
@@ -228,7 +228,7 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
       if (axisYLen > 1e-6) {
         next = rotate4(
           next,
-          5 * sdx,  // Scale factor for sensitivity
+          5 * sdx, // Scale factor for sensitivity
           axisY[0] / axisYLen,
           axisY[1] / axisYLen,
           axisY[2] / axisYLen,
@@ -245,10 +245,10 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
        */
       const currentPitch = axisY[2] / axisYLen;
       if ((sdy > 0 && currentPitch < 0.98) || (sdy < 0 && currentPitch > -0.98)) {
-        next = rotate4(next, -5 * sdy, 1, 0, 0);  // Pitch around camera X
+        next = rotate4(next, -5 * sdy, 1, 0, 0); // Pitch around camera X
       }
 
-      next = translate4(next, 0, 0, -d);  // Step forward to original distance
+      next = translate4(next, 0, 0, -d); // Step forward to original distance
       const out = invert4(next);
       if (out) viewMatrix = out;
 
