@@ -400,10 +400,18 @@ async function main() {
       lastCameraMotionAt = now;
     }
 
-    // Adaptive resolution: lower during motion, restore when still
+    // Adaptive resolution: lower during motion, restore when still.
+    // In point-cloud mode this can cause visible brightness pumping while dragging,
+    // so keep full internal resolution for stable point coverage.
     const cameraActive = now - lastCameraMotionAt < 140;
     const canChangeScale = now - lastScaleChangeAt > 180;
-    if (cameraActive && renderScale > 0.7 && canChangeScale) {
+    if (renderOptions.pointCloud) {
+      if (renderScale !== 1) {
+        renderScale = 1;
+        lastScaleChangeAt = now;
+        renderer.setResolutionScale(renderScale);
+      }
+    } else if (cameraActive && renderScale > 0.7 && canChangeScale) {
       renderScale = 0.7;
       lastScaleChangeAt = now;
       renderer.setResolutionScale(renderScale);
