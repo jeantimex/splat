@@ -48,7 +48,7 @@ import {
   type CameraPose,
   type Mat4,
 } from './viewer/camera';
-import { centerCamera, getEyeViewMatrix } from './viewer/camera-utils';
+import { centerCamera, getEyeViewMatrix, interpolateViewMatrix } from './viewer/camera-utils';
 import { createControls } from './viewer/controls';
 import { getViewerDom, hideSpinner, setupStereoButtons, showSpinner } from './viewer/dom';
 import { createGui, type GuiCallbacks } from './viewer/gui';
@@ -109,6 +109,7 @@ async function main() {
   let currentCameraIndex = 0;
 
   // Camera animation state
+  let startViewMatrix: Mat4 | null = null;
   let targetViewMatrix: Mat4 | null = null;
   let animationStartTime = 0;
 
@@ -127,10 +128,12 @@ async function main() {
 
     const nextView = getViewMatrix(camera);
     if (renderOptions.animateCamera) {
+      startViewMatrix = [...controls.viewMatrix];
       targetViewMatrix = [...nextView];
       animationStartTime = performance.now();
     } else {
       controls.setViewMatrix(nextView);
+      startViewMatrix = null;
       targetViewMatrix = null;
     }
 
@@ -366,24 +369,22 @@ async function main() {
 
     // Cancel animation if user is interacting
     if (controls.isInteracting) {
+      startViewMatrix = null;
       targetViewMatrix = null;
     }
 
-    // Animate camera transition
-    if (targetViewMatrix) {
+    // Animate camera transition using SLERP for smooth rotation
+    if (startViewMatrix && targetViewMatrix) {
       const elapsed = now - animationStartTime;
       const duration = Math.max(renderOptions.animationDuration, 1);
       const t = Math.min(elapsed / duration, 1);
       const ease = t * t * (3 - 2 * t); // Smoothstep easing
 
-      const current = controls.viewMatrix;
-      const next: Mat4 = [];
-      for (let i = 0; i < 16; i++) {
-        next[i] = current[i] + (targetViewMatrix[i] - current[i]) * ease;
-      }
+      const next = interpolateViewMatrix(startViewMatrix, targetViewMatrix, ease);
       controls.setViewMatrix(next);
 
       if (t >= 1) {
+        startViewMatrix = null;
         targetViewMatrix = null;
       }
     }
