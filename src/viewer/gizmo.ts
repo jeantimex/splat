@@ -1,11 +1,18 @@
 import type { Mat4 } from './camera';
 
+export type GizmoAxisKey = 'x' | 'y' | 'z' | '-x' | '-y' | '-z';
+
 export interface CameraGizmo {
   update: (view: Mat4) => void;
+  destroy: () => void;
+}
+
+export interface CameraGizmoOptions {
+  onAxisClick?: (axis: GizmoAxisKey) => void;
 }
 
 type AxisSpec = {
-  key: 'x' | 'y' | 'z' | '-x' | '-y' | '-z';
+  key: GizmoAxisKey;
   vector: [number, number, number];
   color: string;
   label: '' | 'X' | 'Y' | 'Z';
@@ -59,7 +66,10 @@ const AXES: AxisSpec[] = [
   },
 ];
 
-export function createCameraGizmo(canvas: HTMLCanvasElement): CameraGizmo {
+export function createCameraGizmo(
+  canvas: HTMLCanvasElement,
+  options: CameraGizmoOptions = {},
+): CameraGizmo {
   const ctx = canvas.getContext('2d');
   if (!ctx) {
     throw new Error('Unable to create camera gizmo 2D context');
@@ -69,6 +79,9 @@ export function createCameraGizmo(canvas: HTMLCanvasElement): CameraGizmo {
   const center = size * 0.5;
   const armLength = 46;
   const radius = 13;
+  const hitRadius = radius + 3;
+
+  let lastPoints: Array<{ key: GizmoAxisKey; cx: number; cy: number; depth: number }> = [];
 
   const toCamera = (view: Mat4, v: [number, number, number]) => {
     const x = view[0] * v[0] + view[4] * v[1] + view[8] * v[2];
@@ -131,6 +144,34 @@ export function createCameraGizmo(canvas: HTMLCanvasElement): CameraGizmo {
     ctx.restore();
   };
 
+  const handlePointerDown = (event: PointerEvent) => {
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+
+    let best: (typeof lastPoints)[number] | null = null;
+    let bestDistanceSq = Infinity;
+
+    for (const point of lastPoints) {
+      const dx = x - point.cx;
+      const dy = y - point.cy;
+      const distanceSq = dx * dx + dy * dy;
+      if (distanceSq > hitRadius * hitRadius) continue;
+      if (!best || distanceSq < bestDistanceSq || point.depth < best.depth) {
+        best = point;
+        bestDistanceSq = distanceSq;
+      }
+    }
+
+    if (!best) return;
+    event.preventDefault();
+    event.stopPropagation();
+    options.onAxisClick?.(best.key);
+  };
+
+  canvas.addEventListener('pointerdown', handlePointerDown);
+
   const update = (view: Mat4) => {
     const dpr = Math.max(1, window.devicePixelRatio || 1);
     const targetSize = Math.round(size * dpr);
@@ -153,6 +194,12 @@ export function createCameraGizmo(canvas: HTMLCanvasElement): CameraGizmo {
         depth: cam.z,
       };
     });
+    lastPoints = points.map((point) => ({
+      key: point.key,
+      cx: point.cx,
+      cy: point.cy,
+      depth: point.depth,
+    }));
 
     // Draw positive axis stems before nodes for a cleaner gizmo look.
     for (const p of points) {
@@ -172,5 +219,10 @@ export function createCameraGizmo(canvas: HTMLCanvasElement): CameraGizmo {
     }
   };
 
-  return { update };
+  return {
+    update,
+    destroy() {
+      canvas.removeEventListener('pointerdown', handlePointerDown);
+    },
+  };
 }

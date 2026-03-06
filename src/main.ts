@@ -51,7 +51,7 @@ import {
 import { centerCamera, getEyeViewMatrix, interpolateViewMatrix } from './viewer/camera-utils';
 import { createControls } from './viewer/controls';
 import { getViewerDom, hideSpinner, setupStereoButtons, showSpinner } from './viewer/dom';
-import { createCameraGizmo } from './viewer/gizmo';
+import { createCameraGizmo, type GizmoAxisKey } from './viewer/gizmo';
 import { createGui, type GuiCallbacks } from './viewer/gui';
 import { registerDragDrop, registerKeyboardShortcuts } from './viewer/input';
 import { SPLAT_ROW_BYTES } from './viewer/loader';
@@ -105,7 +105,6 @@ async function main() {
 
   const renderer = await createWebGPURenderer(dom.canvas);
   const controls = createControls(dom.canvas);
-  const gizmo = createCameraGizmo(dom.gizmo);
   const renderOptions: RenderOptions = { ...DEFAULT_RENDER_OPTIONS };
   let cameras: CameraPose[] = [...DEFAULT_CAMERAS];
   let currentCameraIndex = 0;
@@ -114,6 +113,106 @@ async function main() {
   let startViewMatrix: Mat4 | null = null;
   let targetViewMatrix: Mat4 | null = null;
   let animationStartTime = 0;
+
+  const animateToView = (nextView: Mat4) => {
+    if (renderOptions.animateCamera) {
+      startViewMatrix = [...controls.viewMatrix];
+      targetViewMatrix = [...nextView];
+      animationStartTime = performance.now();
+    } else {
+      controls.setViewMatrix(nextView);
+      startViewMatrix = null;
+      targetViewMatrix = null;
+    }
+  };
+
+  const normalize3 = (v: [number, number, number]): [number, number, number] => {
+    const len = Math.hypot(v[0], v[1], v[2]);
+    if (len < 1e-8) return [0, 0, 1];
+    return [v[0] / len, v[1] / len, v[2] / len];
+  };
+
+  const cross3 = (
+    a: [number, number, number],
+    b: [number, number, number],
+  ): [number, number, number] => [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ];
+
+  const computeSnapViewMatrix = (axis: GizmoAxisKey): Mat4 | null => {
+    const axisDirection: Record<GizmoAxisKey, [number, number, number]> = {
+      x: [1, 0, 0],
+      '-x': [-1, 0, 0],
+      y: [0, -1, 0],
+      '-y': [0, 1, 0],
+      z: [0, 0, -1],
+      '-z': [0, 0, 1],
+    };
+
+    const inv = invert4(controls.viewMatrix);
+    if (!inv) return null;
+
+    const currentPosition: [number, number, number] = [inv[12], inv[13], inv[14]];
+    const currentForward = normalize3([inv[8], inv[9], inv[10]]);
+
+    // Match controls orbit pivot convention (fixed focus distance in front of camera).
+    const focusDistance = 4;
+    const pivot: [number, number, number] = [
+      currentPosition[0] + currentForward[0] * focusDistance,
+      currentPosition[1] + currentForward[1] * focusDistance,
+      currentPosition[2] + currentForward[2] * focusDistance,
+    ];
+
+    // Axis button selects which world-axis side the camera moves to.
+    const orbitDir = axisDirection[axis];
+    const snappedPosition: [number, number, number] = [
+      pivot[0] + orbitDir[0] * focusDistance,
+      pivot[1] + orbitDir[1] * focusDistance,
+      pivot[2] + orbitDir[2] * focusDistance,
+    ];
+
+    const forward = normalize3([
+      pivot[0] - snappedPosition[0],
+      pivot[1] - snappedPosition[1],
+      pivot[2] - snappedPosition[2],
+    ]);
+    const upRef: [number, number, number] =
+      Math.abs(forward[1]) > 0.98 ? [0, 0, 1] : [0, 1, 0];
+    const right = normalize3(cross3(upRef, forward));
+    const up = normalize3(cross3(forward, right));
+
+    const cameraToWorld: Mat4 = [
+      right[0],
+      right[1],
+      right[2],
+      0,
+      up[0],
+      up[1],
+      up[2],
+      0,
+      forward[0],
+      forward[1],
+      forward[2],
+      0,
+      snappedPosition[0],
+      snappedPosition[1],
+      snappedPosition[2],
+      1,
+    ];
+
+    return invert4(cameraToWorld);
+  };
+
+  const gizmo = createCameraGizmo(dom.gizmo, {
+    onAxisClick: (axis) => {
+      controls.setCarousel(false);
+      const snapped = computeSnapViewMatrix(axis);
+      if (!snapped) return;
+      animateToView(snapped);
+    },
+  });
 
   // ==========================================================================
   // CAMERA PRESET MANAGEMENT
@@ -129,15 +228,7 @@ async function main() {
     const camera = cameras[currentCameraIndex];
 
     const nextView = getViewMatrix(camera);
-    if (renderOptions.animateCamera) {
-      startViewMatrix = [...controls.viewMatrix];
-      targetViewMatrix = [...nextView];
-      animationStartTime = performance.now();
-    } else {
-      controls.setViewMatrix(nextView);
-      startViewMatrix = null;
-      targetViewMatrix = null;
-    }
+    animateToView(nextView);
 
     controls.camera.fx = camera.fx;
     controls.camera.fy = camera.fy;
@@ -521,6 +612,7 @@ async function main() {
 
   window.addEventListener('beforeunload', () => sortWorker.terminate());
   window.addEventListener('beforeunload', () => gui.destroy());
+  window.addEventListener('beforeunload', () => gizmo.destroy());
   requestAnimationFrame(frame);
 }
 

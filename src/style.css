@@ -23,7 +23,8 @@ body {
   top: 14px;
   width: 120px;
   height: 120px;
-  pointer-events: none;
+  pointer-events: auto;
+  cursor: pointer;
   z-index: 12;
 }
 
