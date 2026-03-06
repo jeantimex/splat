@@ -235,18 +235,8 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
         );
       }
 
-      /**
-       * PITCH CLAMPING
-       * Prevent the camera from flipping over the poles (gimbal lock avoidance).
-       *
-       * axisY[2] represents how aligned the camera's up is with world Z.
-       * When |axisY[2]| ≈ 1, camera is looking nearly straight up or down.
-       * Clamping at 0.98 (~78°) prevents uncomfortable flipping.
-       */
-      const currentPitch = axisY[2] / axisYLen;
-      if ((sdy > 0 && currentPitch < 0.98) || (sdy < 0 && currentPitch > -0.98)) {
-        next = rotate4(next, -5 * sdy, 1, 0, 0); // Pitch around camera X
-      }
+      // Unrestricted pitch: allow full vertical rotation.
+      next = rotate4(next, -5 * sdy, 1, 0, 0); // Pitch around camera X
 
       next = translate4(next, 0, 0, -d); // Step forward to original distance
       const out = invert4(next);
@@ -315,12 +305,9 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
           );
         }
 
-        // Apply pitch inertia with clamping.
-        const currentPitch = axisY[2] / axisYLen;
+        // Unrestricted pitch inertia.
         const pitchDelta = -5 * orbitVelocity.dy * dtFactor;
-        if ((pitchDelta > 0 && currentPitch < 0.98) || (pitchDelta < 0 && currentPitch > -0.98)) {
-          next = rotate4(next, pitchDelta, 1, 0, 0);
-        }
+        next = rotate4(next, pitchDelta, 1, 0, 0);
 
         next = translate4(next, 0, 0, -d);
         const out = invert4(next);
