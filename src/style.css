@@ -17,6 +17,16 @@ body {
   display: block;
 }
 
+#gizmo {
+  position: absolute;
+  left: 14px;
+  top: 14px;
+  width: 120px;
+  height: 120px;
+  pointer-events: none;
+  z-index: 12;
+}
+
 #message {
   position: absolute;
   inset: 0;

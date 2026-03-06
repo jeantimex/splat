@@ -7,6 +7,7 @@
 /** DOM element references for the viewer UI */
 export interface ViewerDom {
   canvas: HTMLCanvasElement;
+  gizmo: HTMLCanvasElement;
   message: HTMLDivElement;
   spinner: HTMLDivElement;
   fps: HTMLSpanElement;

@@ -18,6 +18,7 @@ export function getViewerDom(): ViewerDom {
   if (!app) throw new Error('Missing #app root element');
 
   const canvas = app.querySelector<HTMLCanvasElement>('#canvas');
+  const gizmo = app.querySelector<HTMLCanvasElement>('#gizmo');
   const message = app.querySelector<HTMLDivElement>('#message');
   const spinner = app.querySelector<HTMLDivElement>('#spinner');
   const fps = app.querySelector<HTMLSpanElement>('#fps');
@@ -28,6 +29,7 @@ export function getViewerDom(): ViewerDom {
 
   if (
     !canvas ||
+    !gizmo ||
     !message ||
     !spinner ||
     !fps ||
@@ -39,7 +41,17 @@ export function getViewerDom(): ViewerDom {
     throw new Error('Missing viewer DOM nodes');
   }
 
-  return { canvas, message, spinner, fps, progress, dropzone, anaglyphButton, stereoButton };
+  return {
+    canvas,
+    gizmo,
+    message,
+    spinner,
+    fps,
+    progress,
+    dropzone,
+    anaglyphButton,
+    stereoButton,
+  };
 }
 
 /**

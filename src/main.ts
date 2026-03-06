@@ -51,6 +51,7 @@ import {
 import { centerCamera, getEyeViewMatrix, interpolateViewMatrix } from './viewer/camera-utils';
 import { createControls } from './viewer/controls';
 import { getViewerDom, hideSpinner, setupStereoButtons, showSpinner } from './viewer/dom';
+import { createCameraGizmo } from './viewer/gizmo';
 import { createGui, type GuiCallbacks } from './viewer/gui';
 import { registerDragDrop, registerKeyboardShortcuts } from './viewer/input';
 import { SPLAT_ROW_BYTES } from './viewer/loader';
@@ -104,6 +105,7 @@ async function main() {
 
   const renderer = await createWebGPURenderer(dom.canvas);
   const controls = createControls(dom.canvas);
+  const gizmo = createCameraGizmo(dom.gizmo);
   const renderOptions: RenderOptions = { ...DEFAULT_RENDER_OPTIONS };
   let cameras: CameraPose[] = [...DEFAULT_CAMERAS];
   let currentCameraIndex = 0;
@@ -366,6 +368,7 @@ async function main() {
 
     // Update camera controls
     controls.update(dtForControls);
+    gizmo.update(controls.viewMatrix);
 
     // Cancel animation if user is interacting
     if (controls.isInteracting) {
