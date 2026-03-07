@@ -1,6 +1,10 @@
-# 3D Gaussian Splatting Viewer
+# WebGPU 3D Gaussian Splatting Viewer
 
 A real-time 3D Gaussian Splatting (3DGS) viewer built with WebGPU and TypeScript. This viewer renders 3D scenes represented as collections of Gaussian primitives, enabling high-quality novel view synthesis directly in the browser.
+
+https://github.com/user-attachments/assets/d013dd1a-3a8e-4057-9a6a-5d398f1e121f
+
+![Live demo](https://jeantimex.github.io/splat/)
 
 ## Overview
 
