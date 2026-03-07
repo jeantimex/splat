@@ -4,7 +4,7 @@ A real-time 3D Gaussian Splatting (3DGS) viewer built with WebGPU and TypeScript
 
 https://github.com/user-attachments/assets/d013dd1a-3a8e-4057-9a6a-5d398f1e121f
 
-![Live demo](https://jeantimex.github.io/splat/)
+[Live demo](https://jeantimex.github.io/splat/)
 
 ## Overview
 
