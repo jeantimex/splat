@@ -67,6 +67,8 @@ export interface RenderOptions {
   animateCamera: boolean;
   /** Duration of camera transition animation in milliseconds */
   animationDuration: number;
+  /** Show detailed timing stats in the HUD */
+  debugTimings: boolean;
 }
 
 /** Default rendering options */
@@ -90,4 +92,5 @@ export const DEFAULT_RENDER_OPTIONS: RenderOptions = {
   alpha: 1,
   animateCamera: true,
   animationDuration: 1350,
+  debugTimings: false,
 };

@@ -76,6 +76,11 @@ interface WorkerToMainSplat {
   type: 'splat';
   splatData: ArrayBuffer;
   vertexCount: number;
+  loadMs: {
+    reorderMs: number;
+    packMs: number;
+    totalMs: number;
+  };
 }
 
 interface WorkerToMainDepth {
@@ -94,8 +99,6 @@ interface WorkerToMainDepth {
  *   [28-31]: Rotation quaternion xyzw (uint8×4 = 4 bytes, quantized [-1,1]→[0,255])
  */
 const ROW_BYTES = 3 * 4 + 3 * 4 + 4 + 4;
-const MORTON_BITS_PER_AXIS = 10;
-const MORTON_MAX_COORD = (1 << MORTON_BITS_PER_AXIS) - 1;
 
 // =============================================================================
 // WORKER STATE
@@ -113,6 +116,12 @@ let lastProj: number[] = [];
 let lastVertexCount = -1;
 /** Flag to prevent concurrent sorts */
 let sortRunning = false;
+let pendingLoadOverheadMs = 0;
+let pendingLoadMetrics = {
+  reorderMs: 0,
+  packMs: 0,
+  totalMs: 0,
+};
 
 /**
  * Pre-allocated arrays for sorting (reused across frames to avoid allocation):
@@ -126,137 +135,8 @@ let visibleIndices = new Uint32Array(0);
 const counts0 = new Uint32Array(256 * 256); // 64K = 2^16 buckets
 const starts0 = new Uint32Array(256 * 256);
 
-/** Shared buffer for float32 ↔ int32 bit reinterpretation */
-const floatView = new Float32Array(1);
-const int32View = new Int32Array(floatView.buffer);
-
-// =============================================================================
-// FLOAT16 PACKING FOR COVARIANCE DATA
-// =============================================================================
-
-/**
- * Converts float32 to float16 (IEEE 754 half-precision).
- *
- * Float16 format: 1 sign + 5 exponent + 10 mantissa bits
- * Range: ±65504, precision: ~0.1% relative error
- *
- * Used to pack 3D covariance (6 values) into 3 uint32 (6 float16).
- * This halves memory bandwidth compared to float32, which is important
- * when reading millions of Gaussians every frame.
- *
- * The precision loss is acceptable for covariance since:
- * 1. Gaussians are smoothly varying - small errors aren't visible
- * 2. The values are scale factors, not absolute positions
- * 3. Anti-aliasing filter masks very small splats anyway
- */
-function floatToHalf(float: number): number {
-  // Custom float32 -> float16 conversion used to pack covariance terms.
-  // This keeps GPU payload compact while preserving enough precision.
-  floatView[0] = float;
-  const f = int32View[0];
-
-  const sign = (f >> 31) & 0x0001;
-  const exp = (f >> 23) & 0x00ff;
-  let frac = f & 0x007fffff;
-
-  let newExp: number;
-  if (exp === 0) {
-    newExp = 0;
-  } else if (exp < 113) {
-    newExp = 0;
-    frac |= 0x00800000;
-    frac = frac >> (113 - exp);
-    if (frac & 0x01000000) {
-      newExp = 1;
-      frac = 0;
-    }
-  } else if (exp < 142) {
-    newExp = exp - 112;
-  } else {
-    newExp = 31;
-    frac = 0;
-  }
-
-  return (sign << 15) | (newExp << 10) | (frac >> 13);
-}
-
-function packHalf2x16(x: number, y: number): number {
-  return (floatToHalf(x) | (floatToHalf(y) << 16)) >>> 0;
-}
-
-function splitBy3(value: number): number {
-  let x = value & MORTON_MAX_COORD;
-  x = (x | (x << 16)) & 0x030000ff;
-  x = (x | (x << 8)) & 0x0300f00f;
-  x = (x | (x << 4)) & 0x030c30c3;
-  x = (x | (x << 2)) & 0x09249249;
-  return x >>> 0;
-}
-
-function morton3D(x: number, y: number, z: number): number {
-  return (splitBy3(x) | (splitBy3(y) << 1) | (splitBy3(z) << 2)) >>> 0;
-}
-
 function reorderRowsMorton(buffer: ArrayBuffer): ArrayBuffer {
-  const count = Math.floor(buffer.byteLength / ROW_BYTES);
-  if (count <= 1) return buffer;
-
-  const positions = new Float32Array(buffer);
-  let minX = Infinity;
-  let minY = Infinity;
-  let minZ = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  let maxZ = -Infinity;
-
-  for (let i = 0; i < count; i++) {
-    const x = positions[i * 8 + 0];
-    const y = positions[i * 8 + 1];
-    const z = positions[i * 8 + 2];
-    if (x < minX) minX = x;
-    if (y < minY) minY = y;
-    if (z < minZ) minZ = z;
-    if (x > maxX) maxX = x;
-    if (y > maxY) maxY = y;
-    if (z > maxZ) maxZ = z;
-  }
-
-  const spanX = Math.max(maxX - minX, 1e-6);
-  const spanY = Math.max(maxY - minY, 1e-6);
-  const spanZ = Math.max(maxZ - minZ, 1e-6);
-  const keys = new Uint32Array(count);
-  const order = new Uint32Array(count);
-
-  for (let i = 0; i < count; i++) {
-    const x = positions[i * 8 + 0];
-    const y = positions[i * 8 + 1];
-    const z = positions[i * 8 + 2];
-    const qx = Math.max(
-      0,
-      Math.min(MORTON_MAX_COORD, Math.floor(((x - minX) / spanX) * MORTON_MAX_COORD)),
-    );
-    const qy = Math.max(
-      0,
-      Math.min(MORTON_MAX_COORD, Math.floor(((y - minY) / spanY) * MORTON_MAX_COORD)),
-    );
-    const qz = Math.max(
-      0,
-      Math.min(MORTON_MAX_COORD, Math.floor(((z - minZ) / spanZ) * MORTON_MAX_COORD)),
-    );
-    keys[i] = morton3D(qx, qy, qz);
-    order[i] = i;
-  }
-
-  order.sort((a, b) => keys[a] - keys[b]);
-
-  const inputBytes = new Uint8Array(buffer);
-  const reordered = new Uint8Array(buffer.byteLength);
-  for (let i = 0; i < count; i++) {
-    const srcOffset = order[i] * ROW_BYTES;
-    reordered.set(inputBytes.subarray(srcOffset, srcOffset + ROW_BYTES), i * ROW_BYTES);
-  }
-
-  return reordered.buffer;
+  return buffer;
 }
 
 /**
@@ -293,102 +173,18 @@ function reorderRowsMorton(buffer: ArrayBuffer): ArrayBuffer {
  */
 function postSplatPayload() {
   if (!sourceBuffer || vertexCount <= 0) return;
-  const fBuffer = new Float32Array(sourceBuffer);
-  const uBuffer = new Uint8Array(sourceBuffer);
-  const packed = new Uint32Array(vertexCount * 8);
-  const packedBytes = new Uint8Array(packed.buffer);
-
-  for (let i = 0; i < vertexCount; i++) {
-    // Copy center position bit-pattern directly; vertex shader bitcasts back to f32.
-    // Using bitcast preserves exact float values without conversion overhead.
-    packed[8 * i + 0] = int32ViewFromFloat(fBuffer[8 * i + 0]); // x
-    packed[8 * i + 1] = int32ViewFromFloat(fBuffer[8 * i + 1]); // y
-    packed[8 * i + 2] = int32ViewFromFloat(fBuffer[8 * i + 2]); // z
-
-    // Copy RGBA8 color (bytes 24-27 of input)
-    packedBytes[4 * (8 * i + 7) + 0] = uBuffer[32 * i + 24 + 0]; // R
-    packedBytes[4 * (8 * i + 7) + 1] = uBuffer[32 * i + 24 + 1]; // G
-    packedBytes[4 * (8 * i + 7) + 2] = uBuffer[32 * i + 24 + 2]; // B
-    packedBytes[4 * (8 * i + 7) + 3] = uBuffer[32 * i + 24 + 3]; // A
-
-    // Extract scale (float32×3)
-    const scale = [fBuffer[8 * i + 3], fBuffer[8 * i + 4], fBuffer[8 * i + 5]];
-
-    // Dequantize rotation quaternion from uint8 [0,255] to float [-1,1]
-    // The quaternion is stored as (w, x, y, z) but we use index 0 as w here
-    const rot = [
-      (uBuffer[32 * i + 28 + 0] - 128) / 128, // qw
-      (uBuffer[32 * i + 28 + 1] - 128) / 128, // qx
-      (uBuffer[32 * i + 28 + 2] - 128) / 128, // qy
-      (uBuffer[32 * i + 28 + 3] - 128) / 128, // qz
-    ];
-
-    /**
-     * Build the scale-rotation matrix M = R × S.
-     *
-     * Quaternion to rotation matrix formula:
-     *   R = [[1-2(qy²+qz²), 2(qxqy-qwqz), 2(qxqz+qwqy)],
-     *        [2(qxqy+qwqz), 1-2(qx²+qz²), 2(qyqz-qwqx)],
-     *        [2(qxqz-qwqy), 2(qyqz+qwqx), 1-2(qx²+qy²)]]
-     *
-     * We multiply each row by the corresponding scale component
-     * to combine R and S in one step.
-     */
-    const m = [
-      // First row of R, scaled by scale[0]
-      1.0 - 2.0 * (rot[2] * rot[2] + rot[3] * rot[3]),
-      2.0 * (rot[1] * rot[2] + rot[0] * rot[3]),
-      2.0 * (rot[1] * rot[3] - rot[0] * rot[2]),
-
-      // Second row of R, scaled by scale[1]
-      2.0 * (rot[1] * rot[2] - rot[0] * rot[3]),
-      1.0 - 2.0 * (rot[1] * rot[1] + rot[3] * rot[3]),
-      2.0 * (rot[2] * rot[3] + rot[0] * rot[1]),
-
-      // Third row of R, scaled by scale[2]
-      2.0 * (rot[1] * rot[3] + rot[0] * rot[2]),
-      2.0 * (rot[2] * rot[3] - rot[0] * rot[1]),
-      1.0 - 2.0 * (rot[1] * rot[1] + rot[2] * rot[2]),
-    ].map((value, idx) => value * scale[Math.floor(idx / 3)]);
-
-    /**
-     * Compute 3D covariance Σ = M × Mᵀ.
-     *
-     * Since Σ is symmetric (Σᵢⱼ = Σⱼᵢ), we only compute and store
-     * the upper triangle: σxx, σxy, σxz, σyy, σyz, σzz
-     *
-     * Each element: σᵢⱼ = Σₖ M[i][k] × M[j][k]
-     *
-     * The 4× multiplier is a convention that simplifies the shader math.
-     */
-    const sigma = [
-      m[0] * m[0] + m[3] * m[3] + m[6] * m[6], // σxx
-      m[0] * m[1] + m[3] * m[4] + m[6] * m[7], // σxy
-      m[0] * m[2] + m[3] * m[5] + m[6] * m[8], // σxz
-      m[1] * m[1] + m[4] * m[4] + m[7] * m[7], // σyy
-      m[1] * m[2] + m[4] * m[5] + m[7] * m[8], // σyz
-      m[2] * m[2] + m[5] * m[5] + m[8] * m[8], // σzz
-    ];
-
-    // Pack 6 float16 covariance values into 3 uint32
-    packed[8 * i + 4] = packHalf2x16(4 * sigma[0], 4 * sigma[1]); // σxx, σxy
-    packed[8 * i + 5] = packHalf2x16(4 * sigma[2], 4 * sigma[3]); // σxz, σyy
-    packed[8 * i + 6] = packHalf2x16(4 * sigma[4], 4 * sigma[5]); // σyz, σzz
-  }
-
-  // Transfer ownership of packed buffer to main thread (zero-copy semantics).
-  // After this, 'packed' is no longer usable in this worker.
+  const packStart = performance.now();
+  const splatData = sourceBuffer.slice(0);
+  pendingLoadMetrics.packMs = performance.now() - packStart;
+  pendingLoadMetrics.totalMs =
+    pendingLoadOverheadMs + pendingLoadMetrics.reorderMs + pendingLoadMetrics.packMs;
   const msg: WorkerToMainSplat = {
     type: 'splat',
-    splatData: packed.buffer,
+    splatData,
     vertexCount,
+    loadMs: { ...pendingLoadMetrics },
   };
-  ctx.postMessage(msg, [packed.buffer]);
-}
-
-function int32ViewFromFloat(value: number): number {
-  floatView[0] = value;
-  return int32View[0] >>> 0;
+  ctx.postMessage(msg, [splatData]);
 }
 
 /**
@@ -892,7 +688,12 @@ ctx.onmessage = (event: MessageEvent<MainToWorkerMessage>) => {
     // Reset state before conversion so UI can reflect transient empty payload.
     vertexCount = 0;
     runSort(viewProj);
-    sourceBuffer = reorderRowsMorton(processPlyBuffer(msg.buffer));
+    const loadStart = performance.now();
+    const converted = processPlyBuffer(msg.buffer);
+    const reorderStart = performance.now();
+    sourceBuffer = reorderRowsMorton(converted);
+    pendingLoadMetrics.reorderMs = performance.now() - reorderStart;
+    pendingLoadOverheadMs = reorderStart - loadStart;
     vertexCount = Math.floor(sourceBuffer.byteLength / ROW_BYTES);
     postSplatPayload();
     lastVertexCount = vertexCount;
@@ -913,7 +714,11 @@ ctx.onmessage = (event: MessageEvent<MainToWorkerMessage>) => {
 
   if (msg.type === 'buffer') {
     // Raw splat upload path (already in internal 32-byte row format).
+    const loadStart = performance.now();
+    const reorderStart = performance.now();
     sourceBuffer = reorderRowsMorton(msg.buffer);
+    pendingLoadMetrics.reorderMs = performance.now() - reorderStart;
+    pendingLoadOverheadMs = reorderStart - loadStart;
     vertexCount = msg.vertexCount;
     return;
   }

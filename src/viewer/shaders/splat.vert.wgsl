@@ -12,7 +12,7 @@
  * computed analytically using the Jacobian of the projection transform.
  *
  * Given:
- *   - 3D covariance Σ (stored as upper triangle in splat buffer)
+ *   - 3D Gaussian scale/rotation (stored in raw .splat row layout)
  *   - View matrix V (camera pose)
  *   - Projection with focal lengths (fx, fy)
  *
@@ -79,11 +79,11 @@ struct Uniforms {
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 
 /**
- * Packed Gaussian data: 8 uint32 per Gaussian (32 bytes total)
+ * Raw .splat row data: 8 uint32 per Gaussian (32 bytes total)
  *   [0-2]: Position (x, y, z) as float32 bit patterns
- *   [3]:   Unused
- *   [4-6]: 3D covariance upper triangle (6 float16 packed into 3 uint32)
- *   [7]:   Color RGBA8 packed into 1 uint32
+ *   [3-5]: Scale (sx, sy, sz) as float32 bit patterns
+ *   [6]:   Color RGBA8 packed into 1 uint32
+ *   [7]:   Rotation quaternion bytes (qw, qx, qy, qz) quantized to uint8
  */
 @group(0) @binding(1) var<storage, read> splats: array<u32>;
 
@@ -146,6 +146,11 @@ fn vs_main(input: VSIn) -> VSOut {
     bitcast<f32>(splats[base + 1u]),
     bitcast<f32>(splats[base + 2u]),
   );
+  let scale = vec3<f32>(
+    bitcast<f32>(splats[base + 3u]),
+    bitcast<f32>(splats[base + 4u]),
+    bitcast<f32>(splats[base + 5u]),
+  );
 
   // ==========================================================================
   // STEP 2: Project center to screen space
@@ -182,7 +187,7 @@ fn vs_main(input: VSIn) -> VSOut {
   // ==========================================================================
   // STEP 4: Unpack color (RGBA8 packed into one uint32)
   // ==========================================================================
-  let packed_color = splats[base + 7u];
+  let packed_color = splats[base + 6u];
   let color = vec4<f32>(
     f32(packed_color & 0xffu),          // R: bits 0-7
     f32((packed_color >> 8u) & 0xffu),  // G: bits 8-15
@@ -210,20 +215,46 @@ fn vs_main(input: VSIn) -> VSOut {
     // GAUSSIAN SPLAT MODE: Project 3D covariance to 2D ellipse
     // ========================================================================
 
-    // Unpack 3D covariance from 6 float16 values stored in 3 uint32
-    // cov0 = (σxx, σxy), cov1 = (σxz, σyy), cov2 = (σyz, σzz)
-    let cov0 = unpack2x16float(splats[base + 4u]);
-    let cov1 = unpack2x16float(splats[base + 5u]);
-    let cov2 = unpack2x16float(splats[base + 6u]);
+    // Decode quaternion from uint8 storage. We preserve the existing runtime
+    // convention used by the old CPU packer: bytes encode (qw, qx, qy, qz).
+    let packed_rotation = splats[base + 7u];
+    let qw = (f32(packed_rotation & 0xffu) - 128.0) / 128.0;
+    let qx = (f32((packed_rotation >> 8u) & 0xffu) - 128.0) / 128.0;
+    let qy = (f32((packed_rotation >> 16u) & 0xffu) - 128.0) / 128.0;
+    let qz = (f32((packed_rotation >> 24u) & 0xffu) - 128.0) / 128.0;
+
+    let qxqx = qx * qx;
+    let qyqy = qy * qy;
+    let qzqz = qz * qz;
+    let qxqy = qx * qy;
+    let qxqz = qx * qz;
+    let qyqz = qy * qz;
+    let qwqx = qw * qx;
+    let qwqy = qw * qy;
+    let qwqz = qw * qz;
+
+    let m0 = (1.0 - 2.0 * (qyqy + qzqz)) * scale.x;
+    let m1 = (2.0 * (qxqy + qwqz)) * scale.x;
+    let m2 = (2.0 * (qxqz - qwqy)) * scale.x;
+    let m3 = (2.0 * (qxqy - qwqz)) * scale.y;
+    let m4 = (1.0 - 2.0 * (qxqx + qzqz)) * scale.y;
+    let m5 = (2.0 * (qyqz + qwqx)) * scale.y;
+    let m6 = (2.0 * (qxqz + qwqy)) * scale.z;
+    let m7 = (2.0 * (qyqz - qwqx)) * scale.z;
+    let m8 = (1.0 - 2.0 * (qxqx + qyqy)) * scale.z;
+
+    let sigma0 = 4.0 * (m0 * m0 + m3 * m3 + m6 * m6); // σxx
+    let sigma1 = 4.0 * (m0 * m1 + m3 * m4 + m6 * m7); // σxy
+    let sigma2 = 4.0 * (m0 * m2 + m3 * m5 + m6 * m8); // σxz
+    let sigma3 = 4.0 * (m1 * m1 + m4 * m4 + m7 * m7); // σyy
+    let sigma4 = 4.0 * (m1 * m2 + m4 * m5 + m7 * m8); // σyz
+    let sigma5 = 4.0 * (m2 * m2 + m5 * m5 + m8 * m8); // σzz
 
     // Reconstruct 3D covariance matrix (symmetric)
-    // vrk = | σxx  σxy  σxz |
-    //       | σxy  σyy  σyz |
-    //       | σxz  σyz  σzz |
     let vrk = mat3x3<f32>(
-      vec3<f32>(cov0.x, cov0.y, cov1.x),  // Column 0
-      vec3<f32>(cov0.y, cov1.y, cov2.x),  // Column 1
-      vec3<f32>(cov1.x, cov2.x, cov2.y)   // Column 2
+      vec3<f32>(sigma0, sigma1, sigma2),
+      vec3<f32>(sigma1, sigma3, sigma4),
+      vec3<f32>(sigma2, sigma4, sigma5)
     );
 
     // =======================================================================

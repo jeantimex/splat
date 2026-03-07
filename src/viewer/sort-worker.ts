@@ -66,6 +66,12 @@ export interface SplatPayload {
   splatData: Uint32Array;
   /** Total number of Gaussians */
   vertexCount: number;
+  /** CPU-side load/preprocess timings in milliseconds */
+  loadMs: {
+    reorderMs: number;
+    packMs: number;
+    totalMs: number;
+  };
 }
 
 /** Callbacks for receiving data from the sort worker */
@@ -81,7 +87,12 @@ export interface SortWorkerCallbacks {
 /** Message types sent from worker to main thread */
 type WorkerMessage =
   | { type: 'depth'; depthIndex: ArrayBuffer; vertexCount: number; sortMs: number }
-  | { type: 'splat'; splatData: ArrayBuffer; vertexCount: number }
+  | {
+      type: 'splat';
+      splatData: ArrayBuffer;
+      vertexCount: number;
+      loadMs: { reorderMs: number; packMs: number; totalMs: number };
+    }
   | { type: 'buffer'; buffer: ArrayBuffer; save: boolean };
 
 /**
@@ -108,6 +119,7 @@ export function createSortWorker(callbacks: SortWorkerCallbacks): SortWorkerBrid
       callbacks.onSplatData?.({
         splatData: new Uint32Array(data.splatData),
         vertexCount: data.vertexCount,
+        loadMs: data.loadMs,
       });
       return;
     }

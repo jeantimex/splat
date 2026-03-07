@@ -125,5 +125,9 @@ export function createGui(
   colorGui.add(renderOptions, 'alpha', 0, 1, 0.001).name('Alpha');
   colorGui.close();
 
+  const debugGui = gui.addFolder('Debug');
+  debugGui.add(renderOptions, 'debugTimings').name('Show Timings');
+  debugGui.close();
+
   return gui;
 }

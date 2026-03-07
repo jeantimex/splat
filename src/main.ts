@@ -336,6 +336,22 @@ async function main() {
   const lastPostedViewProj = new Float32Array(16);
   let sortMsSample = 0;
   let sortMsPending = false;
+  let lastLoadMetrics = {
+    reorderMs: 0,
+    packMs: 0,
+    totalMs: 0,
+  };
+  let lastReadMs = 0;
+  let lastFirstFrameMs = 0;
+  let pendingLoadStartedAt = 0;
+  let pendingFirstFrameAfterLoad = false;
+  let pendingLoadHasSort = false;
+  let pendingLoadHasSplat = false;
+
+  const armFirstFrameTiming = () => {
+    if (pendingLoadStartedAt <= 0 || !pendingLoadHasSort || !pendingLoadHasSplat) return;
+    pendingFirstFrameAfterLoad = true;
+  };
 
   // ==========================================================================
   // URL HASH CAMERA PERSISTENCE
@@ -369,14 +385,23 @@ async function main() {
       renderer.setSortedIndices(depthIndex);
       sortMsSample = sortMs;
       sortMsPending = true;
+      if (pendingLoadStartedAt > 0) {
+        pendingLoadHasSort = true;
+        armFirstFrameTiming();
+      }
       requestRender();
     },
-    onSplatData: ({ splatData, vertexCount }) => {
+    onSplatData: ({ splatData, vertexCount, loadMs }) => {
       loadedVertices = vertexCount;
+      lastLoadMetrics = loadMs;
       renderer.setSplatData(splatData, vertexCount);
       hideSpinner(dom);
       dom.dropzone.classList.add('hidden');
       centerCamera(splatData, vertexCount, controls);
+      if (pendingLoadStartedAt > 0) {
+        pendingLoadHasSplat = true;
+        armFirstFrameTiming();
+      }
       requestRender();
     },
     onConvertedBuffer: (buffer, save) => {
@@ -418,6 +443,12 @@ async function main() {
     onFile: async (file) => {
       controls.setCarousel(false);
       showSpinner(dom);
+      pendingLoadStartedAt = performance.now();
+      pendingFirstFrameAfterLoad = false;
+      pendingLoadHasSort = false;
+      pendingLoadHasSplat = false;
+      lastReadMs = 0;
+      lastFirstFrameMs = 0;
 
       // Handle camera JSON files
       if (/\.json$/i.test(file.name)) {
@@ -436,6 +467,7 @@ async function main() {
 
       // Handle scene files (PLY or SPLAT)
       const buffer = await file.arrayBuffer();
+      lastReadMs = performance.now() - pendingLoadStartedAt;
       if (isPlyBuffer(buffer)) {
         sortWorker.postPlyBuffer(buffer, false);
         return;
@@ -607,6 +639,13 @@ async function main() {
       tint: renderOptions.tint,
       alpha: renderOptions.alpha,
     });
+    if (pendingFirstFrameAfterLoad && pendingLoadStartedAt > 0) {
+      lastFirstFrameMs = performance.now() - pendingLoadStartedAt;
+      pendingFirstFrameAfterLoad = false;
+      pendingLoadHasSort = false;
+      pendingLoadHasSplat = false;
+      pendingLoadStartedAt = 0;
+    }
 
     // Update performance stats
     const timings = renderer.consumeTimings();
@@ -621,7 +660,11 @@ async function main() {
       smoothedSortMs *= 0.99;
     }
 
-    dom.fps.textContent = `${Math.round(smoothedFps)} fps | ${loadedVertices.toLocaleString()} pts | sort ${smoothedSortMs.toFixed(1)}ms | upload ${smoothedUploadMs.toFixed(2)}ms | render ${smoothedRenderMs.toFixed(2)}ms`;
+    dom.fps.textContent = `${Math.round(smoothedFps)} fps | ${loadedVertices.toLocaleString()} pts`;
+    if (renderOptions.debugTimings && loadedVertices > 0) {
+      dom.fps.textContent += ` | sort ${smoothedSortMs.toFixed(1)}ms | upload ${smoothedUploadMs.toFixed(2)}ms | render ${smoothedRenderMs.toFixed(2)}ms`;
+      dom.fps.textContent += ` | read ${lastReadMs.toFixed(1)}ms | load ${lastLoadMetrics.totalMs.toFixed(1)}ms (reorder ${lastLoadMetrics.reorderMs.toFixed(1)}ms, prepare ${lastLoadMetrics.packMs.toFixed(1)}ms) | first frame ${lastFirstFrameMs.toFixed(1)}ms`;
+    }
 
     const isAnimatingCamera = startViewMatrix !== null && targetViewMatrix !== null;
     const viewStillChanging = viewDelta > 1e-6;
