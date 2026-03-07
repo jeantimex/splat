@@ -380,12 +380,8 @@ async function main() {
       requestRender();
     },
     onConvertedBuffer: (buffer, save) => {
-      const uint = new Uint8Array(buffer);
-      loadedVertices = Math.floor(uint.byteLength / SPLAT_ROW_BYTES);
-      sortWorker.postSplatBuffer(buffer, loadedVertices);
-      if (save) {
-        downloadBinary(uint, 'model.splat');
-      }
+      if (!save) return;
+      downloadBinary(new Uint8Array(buffer), 'model.splat');
     },
   });
 

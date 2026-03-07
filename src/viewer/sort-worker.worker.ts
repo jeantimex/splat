@@ -894,12 +894,20 @@ ctx.onmessage = (event: MessageEvent<MainToWorkerMessage>) => {
     runSort(viewProj);
     sourceBuffer = reorderRowsMorton(processPlyBuffer(msg.buffer));
     vertexCount = Math.floor(sourceBuffer.byteLength / ROW_BYTES);
-    const out: WorkerToMainBuffer = {
-      type: 'buffer',
-      buffer: sourceBuffer,
-      save: Boolean(msg.save),
-    };
-    ctx.postMessage(out);
+    postSplatPayload();
+    lastVertexCount = vertexCount;
+    if (viewProj.length >= 16) {
+      runSort(viewProj);
+    }
+    if (msg.save) {
+      const savedBuffer = sourceBuffer.slice(0);
+      const out: WorkerToMainBuffer = {
+        type: 'buffer',
+        buffer: savedBuffer,
+        save: true,
+      };
+      ctx.postMessage(out, [savedBuffer]);
+    }
     return;
   }
 
