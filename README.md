@@ -41,7 +41,7 @@ This viewer implements the full rendering pipeline described in ["3D Gaussian Sp
 │  │                    (sort-worker.worker.ts)                          │    │
 │  │  • Depth sorting (counting sort, O(n))                              │    │
 │  │  • PLY parsing and conversion                                       │    │
-│  │  • Covariance precomputation                                        │    │
+│  │  • Raw .splat / converted .ply transfer                             │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -83,13 +83,12 @@ The rendering pipeline follows these steps each frame:
 
 **Splat Buffer** (32 bytes per Gaussian):
 
-| Offset | Size | Type      | Description                                              |
-| ------ | ---- | --------- | -------------------------------------------------------- |
-| 0-11   | 12   | float32×3 | Position (x, y, z)                                       |
-| 12-15  | 4    | -         | Unused                                                   |
-| 16-21  | 6    | float16×6 | Covariance upper triangle (σxx, σxy, σxz, σyy, σyz, σzz) |
-| 22-23  | 2    | -         | Unused                                                   |
-| 24-27  | 4    | uint8×4   | Color (R, G, B, A)                                       |
+| Offset | Size | Type      | Description                                 |
+| ------ | ---- | --------- | ------------------------------------------- |
+| 0-11   | 12   | float32×3 | Position (x, y, z)                          |
+| 12-23  | 12   | float32×3 | Scale (sx, sy, sz)                          |
+| 24-27  | 4    | uint8×4   | Color (R, G, B, A)                          |
+| 28-31  | 4    | uint8×4   | Rotation quaternion (quantized qw, qx, qy, qz) |
 
 **Sorted Index Buffer**: Maps draw instance index to Gaussian index for back-to-front rendering.
 
@@ -108,9 +107,9 @@ This approach handles millions of Gaussians in 5-30ms, compared to ~100ms for co
 
 ## 3D to 2D Projection
 
-The key mathematical insight of 3DGS is that a 3D Gaussian projects to a 2D Gaussian analytically. Given:
+The key mathematical insight of 3DGS is that a 3D Gaussian projects to a 2D Gaussian analytically. In this viewer, the GPU reconstructs the 3D covariance from:
 
-- 3D covariance matrix Σ₃ₓ₃
+- Scale and rotation stored in the raw `.splat` row
 - View matrix V
 - Projection focal lengths (fx, fy)
 
@@ -127,7 +126,7 @@ J = | fx/z    0    -fx·x/z² |
     |   0   fy/z   -fy·y/z² |
 ```
 
-The 2D covariance defines an ellipse. We extract its axes via eigendecomposition and render each Gaussian as a screen-aligned quad scaled along these axes.
+The 2D covariance defines an ellipse. We extract its axes via eigendecomposition and render each Gaussian as a screen-aligned quad scaled along these axes. Moving this covariance reconstruction into the vertex shader keeps `.splat` load times low because the worker no longer precomputes packed covariance on the CPU.
 
 ## Alpha Blending
 
@@ -212,12 +211,13 @@ The renderer automatically reduces resolution during camera motion to maintain s
 ## Performance Optimizations
 
 1. **Instanced Rendering**: Single draw call renders all Gaussians
-2. **Float16 Covariance**: Halves memory bandwidth vs float32
+2. **Raw `.splat` Upload Path**: Avoids CPU-side covariance packing during load
 3. **Worker Thread Sorting**: Keeps main thread responsive
 4. **Counting Sort**: O(n) complexity for millions of primitives
-5. **Early Exit**: Skip re-sorting when camera is stationary
-6. **Frustum Culling**: Discard Gaussians outside view
-7. **Fragment Discard**: Skip pixels with negligible contribution
+5. **Invalidation-Driven Rendering**: Stops the RAF loop while the view is static
+6. **Adaptive Resolution**: Reduces internal resolution during motion
+7. **Frustum Culling**: Discard Gaussians outside view
+8. **Fragment Discard**: Skip pixels with negligible contribution
 
 ## Browser Requirements
 
@@ -262,7 +262,7 @@ From rotation quaternion q = (w, x, y, z) and scale s = (sx, sy, sz):
 3. Compute M = R × S (scale-rotation matrix)
 4. Compute Σ = M × Mᵀ (covariance)
 
-The covariance is symmetric, so only 6 values are stored.
+The covariance is symmetric, so only 6 unique values are needed. In the current implementation this reconstruction happens in the vertex shader instead of being prepacked on the CPU.
 
 ### Gaussian Evaluation
 

@@ -11,6 +11,10 @@
  * covariance Σ₂ₓ₂. The key insight is that this projection can be
  * computed analytically using the Jacobian of the projection transform.
  *
+ * In this viewer the runtime buffer stores raw .splat rows, so the shader
+ * reconstructs covariance from scale + quaternion instead of reading a
+ * prepacked covariance block prepared on the CPU.
+ *
  * Given:
  *   - 3D Gaussian scale/rotation (stored in raw .splat row layout)
  *   - View matrix V (camera pose)
@@ -146,6 +150,8 @@ fn vs_main(input: VSIn) -> VSOut {
     bitcast<f32>(splats[base + 1u]),
     bitcast<f32>(splats[base + 2u]),
   );
+  // Raw .splat rows keep linear scale in the payload, which is cheaper to
+  // load than precomputing covariance on the CPU at file-open time.
   let scale = vec3<f32>(
     bitcast<f32>(splats[base + 3u]),
     bitcast<f32>(splats[base + 4u]),

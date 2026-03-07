@@ -41,6 +41,8 @@ export function createGui(
   gui.close();
 
   const aboutGui = gui.addFolder('About');
+  // lil-gui exposes the folder body via an internal element; we use it here
+  // because the About section needs richer markup than a controller row.
   const aboutChildren = (aboutGui as GUI & { $children?: HTMLElement }).$children;
   if (aboutChildren) {
     const intro = document.createElement('div');

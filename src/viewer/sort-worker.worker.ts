@@ -39,23 +39,11 @@
  *    - f_dc_0, f_dc_1, f_dc_2: DC spherical harmonic (→ RGB color)
  *    - opacity: Logit-space opacity (sigmoid() to get [0,1])
  *
- * 3. COVARIANCE COMPUTATION
- *    ----------------------
- *    From rotation quaternion (q) and scale (s), we compute the 3D covariance:
- *
- *    1. Quaternion → Rotation matrix R:
- *       R = [[1-2(qy²+qz²), 2(qxqy-qwqz), 2(qxqz+qwqy)],
- *            [2(qxqy+qwqz), 1-2(qx²+qz²), 2(qyqz-qwqx)],
- *            [2(qxqz-qwqy), 2(qyqz+qwqx), 1-2(qx²+qy²)]]
- *
- *    2. Scale → Scale matrix S = diag(sx, sy, sz)
- *
- *    3. Scale-rotation matrix M = R * S
- *
- *    4. Covariance Σ = M * M^T
- *
- *    The covariance defines the 3D ellipsoid shape of the Gaussian.
- *    We store only the upper triangle (6 values) since Σ is symmetric.
+ * 3. PREPARE RENDER DATA
+ *    -------------------
+ *    The worker still owns parsing, conversion, and depth sorting, but the
+ *    current runtime path uploads raw .splat rows directly. Covariance is now
+ *    reconstructed in the vertex shader so .splat files can appear faster.
  */
 
 const ctx: DedicatedWorkerGlobalScope = self as unknown as DedicatedWorkerGlobalScope;
@@ -136,40 +124,17 @@ const counts0 = new Uint32Array(256 * 256); // 64K = 2^16 buckets
 const starts0 = new Uint32Array(256 * 256);
 
 function reorderRowsMorton(buffer: ArrayBuffer): ArrayBuffer {
+  // Runtime Morton reordering is intentionally disabled; benchmarks showed
+  // the startup cost outweighed the steady-state benefit for this viewer.
   return buffer;
 }
 
 /**
- * PACK GAUSSIAN DATA FOR GPU UPLOAD
- * ==================================
+ * PREPARE SPLAT PAYLOAD FOR MAIN THREAD
+ * =====================================
  *
- * Converts internal 32-byte row format to GPU-optimized 32-byte packed format.
- * The key difference is that we precompute the 3D covariance matrix here,
- * saving work in the vertex shader.
- *
- * INPUT (per Gaussian, 32 bytes):
- *   position: float32×3 (12 bytes)
- *   scale: float32×3 (12 bytes)
- *   color: uint8×4 (4 bytes)
- *   rotation: uint8×4 (4 bytes, quantized quaternion)
- *
- * OUTPUT (per Gaussian, 32 bytes = 8 uint32):
- *   [0-2]: Position x,y,z as float32 bit patterns
- *   [3]:   (unused)
- *   [4-6]: Covariance upper triangle as 6 float16 packed into 3 uint32
- *   [7]:   Color RGBA8 packed into 1 uint32
- *
- * COVARIANCE COMPUTATION:
- * -----------------------
- * The 3D covariance matrix Σ defines the ellipsoid shape of each Gaussian.
- * It's computed from rotation quaternion q and scale vector s:
- *
- *   1. Convert quaternion to rotation matrix R (3×3)
- *   2. Create scale matrix S = diag(s.x, s.y, s.z)
- *   3. Compute M = R × S (scale-rotation matrix)
- *   4. Compute Σ = M × Mᵀ (covariance)
- *
- * Since Σ is symmetric, we only store 6 values: [σxx, σxy, σxz, σyy, σyz, σzz]
+ * The renderer now consumes raw 32-byte .splat rows directly, so this step is
+ * just an owned copy/transfer to decouple worker memory from GPU upload timing.
  */
 function postSplatPayload() {
   if (!sourceBuffer || vertexCount <= 0) return;
