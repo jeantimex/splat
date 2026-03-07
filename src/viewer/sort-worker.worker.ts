@@ -94,6 +94,8 @@ interface WorkerToMainDepth {
  *   [28-31]: Rotation quaternion xyzw (uint8×4 = 4 bytes, quantized [-1,1]→[0,255])
  */
 const ROW_BYTES = 3 * 4 + 3 * 4 + 4 + 4;
+const MORTON_BITS_PER_AXIS = 10;
+const MORTON_MAX_COORD = (1 << MORTON_BITS_PER_AXIS) - 1;
 
 // =============================================================================
 // WORKER STATE
@@ -180,6 +182,81 @@ function floatToHalf(float: number): number {
 
 function packHalf2x16(x: number, y: number): number {
   return (floatToHalf(x) | (floatToHalf(y) << 16)) >>> 0;
+}
+
+function splitBy3(value: number): number {
+  let x = value & MORTON_MAX_COORD;
+  x = (x | (x << 16)) & 0x030000ff;
+  x = (x | (x << 8)) & 0x0300f00f;
+  x = (x | (x << 4)) & 0x030c30c3;
+  x = (x | (x << 2)) & 0x09249249;
+  return x >>> 0;
+}
+
+function morton3D(x: number, y: number, z: number): number {
+  return (splitBy3(x) | (splitBy3(y) << 1) | (splitBy3(z) << 2)) >>> 0;
+}
+
+function reorderRowsMorton(buffer: ArrayBuffer): ArrayBuffer {
+  const count = Math.floor(buffer.byteLength / ROW_BYTES);
+  if (count <= 1) return buffer;
+
+  const positions = new Float32Array(buffer);
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+
+  for (let i = 0; i < count; i++) {
+    const x = positions[i * 8 + 0];
+    const y = positions[i * 8 + 1];
+    const z = positions[i * 8 + 2];
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (z < minZ) minZ = z;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+    if (z > maxZ) maxZ = z;
+  }
+
+  const spanX = Math.max(maxX - minX, 1e-6);
+  const spanY = Math.max(maxY - minY, 1e-6);
+  const spanZ = Math.max(maxZ - minZ, 1e-6);
+  const keys = new Uint32Array(count);
+  const order = new Uint32Array(count);
+
+  for (let i = 0; i < count; i++) {
+    const x = positions[i * 8 + 0];
+    const y = positions[i * 8 + 1];
+    const z = positions[i * 8 + 2];
+    const qx = Math.max(
+      0,
+      Math.min(MORTON_MAX_COORD, Math.floor(((x - minX) / spanX) * MORTON_MAX_COORD)),
+    );
+    const qy = Math.max(
+      0,
+      Math.min(MORTON_MAX_COORD, Math.floor(((y - minY) / spanY) * MORTON_MAX_COORD)),
+    );
+    const qz = Math.max(
+      0,
+      Math.min(MORTON_MAX_COORD, Math.floor(((z - minZ) / spanZ) * MORTON_MAX_COORD)),
+    );
+    keys[i] = morton3D(qx, qy, qz);
+    order[i] = i;
+  }
+
+  order.sort((a, b) => keys[a] - keys[b]);
+
+  const inputBytes = new Uint8Array(buffer);
+  const reordered = new Uint8Array(buffer.byteLength);
+  for (let i = 0; i < count; i++) {
+    const srcOffset = order[i] * ROW_BYTES;
+    reordered.set(inputBytes.subarray(srcOffset, srcOffset + ROW_BYTES), i * ROW_BYTES);
+  }
+
+  return reordered.buffer;
 }
 
 /**
@@ -815,7 +892,7 @@ ctx.onmessage = (event: MessageEvent<MainToWorkerMessage>) => {
     // Reset state before conversion so UI can reflect transient empty payload.
     vertexCount = 0;
     runSort(viewProj);
-    sourceBuffer = processPlyBuffer(msg.buffer);
+    sourceBuffer = reorderRowsMorton(processPlyBuffer(msg.buffer));
     vertexCount = Math.floor(sourceBuffer.byteLength / ROW_BYTES);
     const out: WorkerToMainBuffer = {
       type: 'buffer',
@@ -828,7 +905,7 @@ ctx.onmessage = (event: MessageEvent<MainToWorkerMessage>) => {
 
   if (msg.type === 'buffer') {
     // Raw splat upload path (already in internal 32-byte row format).
-    sourceBuffer = msg.buffer;
+    sourceBuffer = reorderRowsMorton(msg.buffer);
     vertexCount = msg.vertexCount;
     return;
   }
