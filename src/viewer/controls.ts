@@ -73,6 +73,10 @@ interface ControlsState {
   update: (dtMs: number) => void;
 }
 
+export interface ControlsOptions {
+  onInvalidate?: () => void;
+}
+
 /**
  * Creates camera controls attached to the given canvas.
  *
@@ -83,7 +87,10 @@ interface ControlsState {
  * @param canvas The canvas element to attach input handlers to
  * @returns ControlsState object for interacting with the camera
  */
-export function createControls(canvas: HTMLCanvasElement): ControlsState {
+export function createControls(
+  canvas: HTMLCanvasElement,
+  options: ControlsOptions = {},
+): ControlsState {
   // ============================================================================
   // CONTROL STATE
   // ============================================================================
@@ -143,9 +150,18 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
     scrollVelocity = 0;
   };
 
-  window.addEventListener('keydown', (event) => activeKeys.add(event.code));
-  window.addEventListener('keyup', (event) => activeKeys.delete(event.code));
-  window.addEventListener('blur', () => activeKeys.clear());
+  window.addEventListener('keydown', (event) => {
+    activeKeys.add(event.code);
+    options.onInvalidate?.();
+  });
+  window.addEventListener('keyup', (event) => {
+    activeKeys.delete(event.code);
+    options.onInvalidate?.();
+  });
+  window.addEventListener('blur', () => {
+    activeKeys.clear();
+    options.onInvalidate?.();
+  });
 
   canvas.addEventListener('mousedown', (event) => {
     event.preventDefault();
@@ -159,6 +175,7 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
     lastDragMoveAt = performance.now();
     // Kill residual inertia so the new gesture starts clean.
     clearInertia();
+    options.onInvalidate?.();
   });
 
   canvas.addEventListener('mouseup', () => {
@@ -167,10 +184,12 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
       clearInertia();
     }
     isDragging = false;
+    options.onInvalidate?.();
   });
 
   canvas.addEventListener('mouseleave', () => {
     isDragging = false;
+    options.onInvalidate?.();
   });
 
   canvas.addEventListener('contextmenu', (event) => {
@@ -187,6 +206,7 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
     lastX = event.clientX;
     lastY = event.clientY;
     lastDragMoveAt = performance.now();
+    options.onInvalidate?.();
 
     if (Math.abs(dx) < 1e-10 && Math.abs(dy) < 1e-10) return;
 
@@ -266,6 +286,7 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
       // Accumulate into scrollVelocity; update() applies and decays it each frame.
       // Multiple wheel events between frames are handled correctly by accumulation.
       scrollVelocity += (-10 * event.deltaY) / Math.max(window.innerHeight, 1);
+      options.onInvalidate?.();
     },
     { passive: false },
   );
@@ -418,6 +439,7 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
     setViewMatrix(matrix) {
       viewMatrix = [...matrix];
       clearInertia();
+      options.onInvalidate?.();
     },
     setCarousel(enabled) {
       carousel = enabled;
@@ -425,6 +447,7 @@ export function createControls(canvas: HTMLCanvasElement): ControlsState {
         carouselStart = performance.now();
         clearInertia();
       }
+      options.onInvalidate?.();
     },
     update,
   };

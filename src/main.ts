@@ -103,8 +103,15 @@ async function main() {
   // INITIALIZE CORE SUBSYSTEMS
   // ==========================================================================
 
+  let frameHandle: number | null = null;
+
+  const requestRender = () => {
+    if (frameHandle !== null) return;
+    frameHandle = requestAnimationFrame(frame);
+  };
+
   const renderer = await createWebGPURenderer(dom.canvas);
-  const controls = createControls(dom.canvas);
+  const controls = createControls(dom.canvas, { onInvalidate: requestRender });
   const renderOptions: RenderOptions = { ...DEFAULT_RENDER_OPTIONS };
   let cameras: CameraPose[] = [...DEFAULT_CAMERAS];
   let currentCameraIndex = 0;
@@ -124,6 +131,7 @@ async function main() {
       startViewMatrix = null;
       targetViewMatrix = null;
     }
+    requestRender();
   };
 
   const normalize3 = (v: [number, number, number]): [number, number, number] => {
@@ -261,6 +269,7 @@ async function main() {
         if (index >= 0 && index < newCameras.length) {
           callbacks.onApplyCamera(index);
         }
+        requestRender();
       });
   };
 
@@ -299,11 +308,17 @@ async function main() {
       Object.assign(renderOptions, DEFAULT_RENDER_OPTIONS);
       gui.controllersRecursive().forEach((c) => c.updateDisplay());
       updateStereoUi();
+      requestRender();
     },
   };
 
   const gui = createGui(renderOptions, guiCallbacks, dom);
-  const updateStereoUi = setupStereoButtons(dom, renderOptions);
+  gui.controllersRecursive().forEach((controller) => {
+    controller.onChange(() => {
+      requestRender();
+    });
+  });
+  const updateStereoUi = setupStereoButtons(dom, renderOptions, requestRender);
   const cameraGui = gui.folders.find((f) => f._title === 'Camera');
 
   // ==========================================================================
@@ -354,6 +369,7 @@ async function main() {
       renderer.setSortedIndices(depthIndex);
       sortMsSample = sortMs;
       sortMsPending = true;
+      requestRender();
     },
     onSplatData: ({ splatData, vertexCount }) => {
       loadedVertices = vertexCount;
@@ -361,6 +377,7 @@ async function main() {
       hideSpinner(dom);
       dom.dropzone.classList.add('hidden');
       centerCamera(splatData, vertexCount, controls);
+      requestRender();
     },
     onConvertedBuffer: (buffer, save) => {
       const uint = new Uint8Array(buffer);
@@ -386,13 +403,18 @@ async function main() {
     applyCamera,
     getCurrentCameraIndex: () => currentCameraIndex,
     saveViewToHash,
-    setCarousel: (enabled) => controls.setCarousel(enabled),
+    setCarousel: (enabled) => {
+      controls.setCarousel(enabled);
+      requestRender();
+    },
   });
 
   // Handle URL hash changes
   window.addEventListener('hashchange', () => {
     setViewFromHash(location.hash.slice(1));
+    requestRender();
   });
+  window.addEventListener('resize', requestRender);
 
   // Register drag-and-drop and click-to-upload file handling
   registerDragDrop({
@@ -411,6 +433,7 @@ async function main() {
           }
           applyCamera(0);
           hideSpinner(dom);
+          requestRender();
         }
         return;
       }
@@ -452,7 +475,8 @@ async function main() {
    * 5. Render all Gaussians with current sorted order
    * 6. Update performance stats
    */
-  const frame = (now: number) => {
+  function frame(now: number) {
+    frameHandle = null;
     const dtMs = Math.max(now - lastFrame, 0.0001);
     const dtForControls = Math.min(dtMs, 34);
     lastFrame = now;
@@ -603,8 +627,21 @@ async function main() {
 
     dom.fps.textContent = `${Math.round(smoothedFps)} fps | ${loadedVertices.toLocaleString()} pts | sort ${smoothedSortMs.toFixed(1)}ms | upload ${smoothedUploadMs.toFixed(2)}ms | render ${smoothedRenderMs.toFixed(2)}ms`;
 
-    requestAnimationFrame(frame);
-  };
+    const isAnimatingCamera = startViewMatrix !== null && targetViewMatrix !== null;
+    const viewStillChanging = viewDelta > 1e-6;
+    const recoveringResolution = renderScale < 1 || now - lastCameraMotionAt < 180;
+    const isTransitioningModes = Math.abs(pcTransition - pcTarget) > 1e-4;
+    const shouldKeepRendering =
+      controls.isInteracting ||
+      isAnimatingCamera ||
+      viewStillChanging ||
+      recoveringResolution ||
+      isTransitioningModes;
+
+    if (shouldKeepRendering) {
+      requestRender();
+    }
+  }
 
   // ==========================================================================
   // CLEANUP AND START
@@ -613,7 +650,7 @@ async function main() {
   window.addEventListener('beforeunload', () => sortWorker.terminate());
   window.addEventListener('beforeunload', () => gui.destroy());
   window.addEventListener('beforeunload', () => gizmo.destroy());
-  requestAnimationFrame(frame);
+  requestRender();
 }
 
 // Start the application

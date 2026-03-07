@@ -79,6 +79,7 @@ export function hideSpinner(dom: ViewerDom): void {
 export function setupStereoButtons(
   viewerDom: ViewerDom,
   renderOptions: { stereoMode: 'off' | 'anaglyph' | 'sbs' },
+  onChange?: () => void,
 ): () => void {
   const updateUi = () => {
     const anaglyphActive = renderOptions.stereoMode === 'anaglyph';
@@ -92,11 +93,13 @@ export function setupStereoButtons(
   viewerDom.anaglyphButton.addEventListener('click', () => {
     renderOptions.stereoMode = renderOptions.stereoMode === 'anaglyph' ? 'off' : 'anaglyph';
     updateUi();
+    onChange?.();
   });
 
   viewerDom.stereoButton.addEventListener('click', () => {
     renderOptions.stereoMode = renderOptions.stereoMode === 'sbs' ? 'off' : 'sbs';
     updateUi();
+    onChange?.();
   });
 
   updateUi();
